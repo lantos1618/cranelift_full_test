@@ -14,15 +14,18 @@ impl<'a, M: Module> CodeGenerator<'a, M> {
         Self { module }
     }
 
-
     pub fn compile_function(&mut self, func: &AstFunction) -> FuncId {
         // Create a signature for the function
         let mut signature = self.module.make_signature();
 
         // Handle return type
-        signature
-            .returns
-            .push(AbiParam::new(self.translate_type(&func.return_type)));
+        if let AstType::Void = func.return_type {
+            // No return type
+        } else {
+            signature
+                .returns
+                .push(AbiParam::new(self.translate_type(&func.return_type)));
+        }
 
         // Handle parameters
         for param in &func.params {
@@ -48,7 +51,6 @@ impl<'a, M: Module> CodeGenerator<'a, M> {
         let entry_block = builder.create_block();
         builder.append_block_params_for_function_params(entry_block);
         builder.switch_to_block(entry_block);
-        builder.seal_block(entry_block);
 
         // Map parameters to variables
         let mut variables = VariableMap::new();
@@ -61,9 +63,20 @@ impl<'a, M: Module> CodeGenerator<'a, M> {
         }
 
         // Compile function body
-        self.compile_statements(&func.body, &mut builder, &mut variables);
+        let block_terminated = self.compile_statements(&func.body, &mut builder, &mut variables);
+
+        // If the block is not terminated, insert a return instruction
+        if !block_terminated {
+            if let AstType::Void = func.return_type {
+                builder.ins().return_(&[]);
+            } else {
+                let default_value = builder.ins().iconst(self.translate_type(&func.return_type), 0);
+                builder.ins().return_(&[default_value]);
+            }
+        }
 
         // Finalize the function
+        builder.seal_all_blocks();
         builder.finalize();
 
         // Define the function in the module
@@ -80,6 +93,7 @@ impl<'a, M: Module> CodeGenerator<'a, M> {
             AstType::Char => types::I8,
             AstType::Array(_, _) => types::I64, // Arrays as pointers
             AstType::Custom(_) => types::I64,   // Custom types as pointers
+            AstType::Void => types::INVALID,    // Void type
         }
     }
 
@@ -122,8 +136,16 @@ impl<'a, M: Module> CodeGenerator<'a, M> {
                     then_branch,
                     else_branch,
                 } => {
-                    self.compile_if_statement(condition, then_branch, else_branch, builder, variables);
-                    // We can't determine termination here; assume not terminated
+                    let terminated = self.compile_if_statement(
+                        condition,
+                        then_branch,
+                        else_branch,
+                        builder,
+                        variables,
+                    );
+                    if terminated {
+                        block_terminated = true;
+                    }
                 }
                 AstStmt::While { condition, body } => {
                     self.compile_while_statement(condition, body, builder, variables);
@@ -153,7 +175,11 @@ impl<'a, M: Module> CodeGenerator<'a, M> {
                     panic!("Undefined variable {}", name);
                 }
             }
-            AstExpr::BinaryOperation { left, operator, right } => {
+            AstExpr::BinaryOperation {
+                left,
+                operator,
+                right,
+            } => {
                 let left_val = self.compile_expression(left, builder, variables);
                 let right_val = self.compile_expression(right, builder, variables);
                 self.compile_binary_operation(*operator, left_val, right_val, builder)
@@ -192,10 +218,10 @@ impl<'a, M: Module> CodeGenerator<'a, M> {
             AstOperator::Subtract => builder.ins().isub(left, right),
             AstOperator::Multiply => builder.ins().imul(left, right),
             AstOperator::Divide => builder.ins().sdiv(left, right),
+            AstOperator::Modulo => builder.ins().srem(left, right),
             // Comparison operations
             AstOperator::Equal => {
                 let cmp = builder.ins().icmp(IntCC::Equal, left, right);
-                // Extend boolean to integer
                 builder.ins().uextend(types::I64, cmp)
             }
             AstOperator::NotEqual => {
@@ -219,8 +245,20 @@ impl<'a, M: Module> CodeGenerator<'a, M> {
                 builder.ins().uextend(types::I64, cmp)
             }
             // Logical operations
-            AstOperator::And => builder.ins().band(left, right),
-            AstOperator::Or => builder.ins().bor(left, right),
+            AstOperator::And => {
+                // Ensure operands are booleans
+                let left_bool = builder.ins().ireduce(types::I8, left);
+                let right_bool = builder.ins().ireduce(types::I8, right);
+                let result = builder.ins().band(left_bool, right_bool);
+                builder.ins().uextend(types::I64, result)
+            }
+            AstOperator::Or => {
+                // Ensure operands are booleans
+                let left_bool = builder.ins().ireduce(types::I8, left);
+                let right_bool = builder.ins().ireduce(types::I8, right);
+                let result = builder.ins().bor(left_bool, right_bool);
+                builder.ins().uextend(types::I64, result)
+            }
             // Bitwise operations
             AstOperator::BitwiseAnd => builder.ins().band(left, right),
             AstOperator::BitwiseOr => builder.ins().bor(left, right),
@@ -288,8 +326,15 @@ impl<'a, M: Module> CodeGenerator<'a, M> {
         }
 
         let call = builder.ins().call(local_callee, &arg_values);
-        builder.inst_results(call)[0]
+
+        if self.translate_type(&AstType::Int) == types::INVALID {
+            // Function has no return value
+            builder.ins().iconst(types::I64, 0) // Return a dummy value
+        } else {
+            builder.inst_results(call)[0]
+        }
     }
+
     fn compile_if_statement(
         &mut self,
         condition: &AstExpr,
@@ -297,19 +342,19 @@ impl<'a, M: Module> CodeGenerator<'a, M> {
         else_branch: &Option<Vec<AstStmt>>,
         builder: &mut FunctionBuilder,
         variables: &mut VariableMap,
-    ) {
+    ) -> bool {
         let then_block = builder.create_block();
         let else_block = builder.create_block();
         let merge_block = builder.create_block();
-    
+
         // Evaluate the condition
         let condition_val = self.compile_expression(condition, builder, variables);
-        let zero = builder.ins().iconst(types::I64, 0);
-        let cmp = builder.ins().icmp(IntCC::NotEqual, condition_val, zero);
-    
-        // Conditional branch to then_block or else_block
-        builder.ins().brif(cmp, then_block, &[], else_block, &[]);
-    
+
+        // Use 'brif' with the condition value
+        builder
+            .ins()
+            .brif(condition_val, then_block, &[], else_block, &[]);
+
         // Then block
         builder.switch_to_block(then_block);
         let then_terminated = self.compile_statements(then_branch, builder, variables);
@@ -317,23 +362,25 @@ impl<'a, M: Module> CodeGenerator<'a, M> {
             builder.ins().jump(merge_block, &[]);
         }
         builder.seal_block(then_block);
-    
+
         // Else block
         builder.switch_to_block(else_block);
         let else_terminated = if let Some(else_stmts) = else_branch {
             self.compile_statements(else_stmts, builder, variables)
         } else {
-            false
+            false // No else statements
         };
         if !else_terminated {
             builder.ins().jump(merge_block, &[]);
         }
         builder.seal_block(else_block);
-    
+
         // Merge block
         builder.switch_to_block(merge_block);
         builder.seal_block(merge_block);
-        // Continue compiling after the if-else statement
+
+        // The block is terminated only if both branches are terminated
+        then_terminated && else_terminated
     }
 
     fn compile_while_statement(
@@ -346,23 +393,21 @@ impl<'a, M: Module> CodeGenerator<'a, M> {
         let loop_header = builder.create_block();
         let loop_body = builder.create_block();
         let after_loop = builder.create_block();
-    
+
         // Initial jump to loop header
         builder.ins().jump(loop_header, &[]);
-    
+
         // Loop header block
         builder.switch_to_block(loop_header);
-    
+
         // Evaluate the condition
         let condition_val = self.compile_expression(condition, builder, variables);
-        let zero = builder.ins().iconst(types::I64, 0);
-        let cmp = builder.ins().icmp(IntCC::NotEqual, condition_val, zero);
-    
-        // Conditional branch to loop body or after loop
-        builder.ins().brif(cmp, loop_body, &[], after_loop, &[]);
-    
-        // Do not seal loop_header yet; it has a back edge from loop_body
-    
+
+        // Use 'brif' with the condition value
+        builder
+            .ins()
+            .brif(condition_val, loop_body, &[], after_loop, &[]);
+
         // Loop body block
         builder.switch_to_block(loop_body);
         let body_terminated = self.compile_statements(body, builder, variables);
@@ -370,13 +415,12 @@ impl<'a, M: Module> CodeGenerator<'a, M> {
             builder.ins().jump(loop_header, &[]);
         }
         builder.seal_block(loop_body);
-    
+
         // Now we can seal loop_header after the back edge has been added
         builder.seal_block(loop_header);
-    
+
         // After loop block
         builder.switch_to_block(after_loop);
-        builder.seal_block(after_loop);
-        // Continue compiling after the loop if needed
+        // Do not seal after_loop here; it may have successors later
     }
-}    
+}

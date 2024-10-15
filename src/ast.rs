@@ -8,9 +8,11 @@ pub enum AstType {
     Float,
     Bool,
     Char,
-    Custom(String),             // For typedefs and user-defined structs
-    Array(Box<AstType>, usize), // Element type and size
+    Array(Box<AstType>, usize),
+    Custom(String),
+    Void,
 }
+
 
 #[derive(Debug, Clone)]
 pub struct Typedef {
