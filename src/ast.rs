@@ -1,132 +1,194 @@
-// src/ast.rs
+#[derive(Debug, Clone)]
+pub enum Expr {
+    // Literals
+    IntLiteral(i64),
+    BoolLiteral(bool),
+    StringLiteral(String),
+    CharLiteral(char),
 
-use std::collections::HashMap;
+    // Variable handling
+    Variable(String),
+    Assignment(String, Box<Expr>),
 
+    // Unary Operations (e.g., -x, !x, *p, &x)
+    UnaryOp(UnaryOp, Box<Expr>),
+
+    // Binary Operations (arithmetic, comparison, logic, bitwise)
+    BinaryOp(Box<Expr>, BinOp, Box<Expr>),
+
+    // Function calls
+    FuncCall(String, Vec<Expr>),
+
+    // Struct Access (e.g., myStruct.field)
+    StructAccess(Box<Expr>, String),
+
+    // Conditional expression (if-else)
+    If {
+        condition: Box<Expr>,
+        then_branch: Box<Stmt>,
+        else_branch: Option<Box<Stmt>>,
+    },
+
+    // Loops
+    While {
+        condition: Box<Expr>,
+        body: Box<Stmt>,
+    },
+
+    // Struct instantiation (e.g., MyStruct { field1: value1, field2: value2 })
+    StructInit {
+        struct_name: String,
+        fields: Vec<(String, Expr)>,
+    },
+
+    // Extern calls (C func calls or dynamic libs) with return type
+    ExternCall {
+        func_name: String,
+        args: Vec<Expr>,
+        return_type: AstType,
+    },
+
+    // Match expression (pattern matching)
+    Match {
+        expression: Box<Expr>,
+        arms: Vec<(Pattern, Stmt)>,
+    },
+
+    // Array access and assignment
+    ArrayAccess {
+        array: Box<Expr>,
+        index: Box<Expr>,
+    },
+    ArrayAssignment {
+        array: Box<Expr>,
+        index: Box<Expr>,
+        value: Box<Expr>,
+    },
+}
+
+// Binary Operations
+#[derive(Debug, Clone)]
+pub enum BinOp {
+    Add,        // +
+    Subtract,   // -
+    Multiply,   // *
+    Divide,     // /
+    And,        // &&
+    Or,         // ||
+    Equal,      // ==
+    NotEqual,   // !=
+    LessThan,   // <
+    GreaterThan, // >
+
+    // Bitwise Operations
+    BitAnd,     // &
+    BitOr,      // |
+    BitXor,     // ^
+    ShiftLeft,  // <<
+    ShiftRight, // >>
+}
+
+// Unary Operations
+#[derive(Debug, Clone)]
+pub enum UnaryOp {
+    Negate,     // - (numeric negation)
+    Not,        // ! (logical negation)
+    Deref,      // * (dereference a pointer)
+    AddressOf,  // & (get the address of a variable)
+    BitNot,     // ~ (bitwise NOT)
+}
+
+// Pattern Matching
+#[derive(Debug, Clone)]
+pub enum Pattern {
+    Literal(Expr),             // Matching literals (e.g., 42)
+    Variable(String),          // Variable binding (e.g., x)
+    Wildcard,                  // Wildcard (_) pattern
+    StructPattern {            // Struct deconstruction
+        struct_name: String,
+        fields: Vec<(String, Pattern)>,
+    },
+}
+
+// Function declaration with types for parameters
+#[derive(Debug, Clone)]
+pub struct FuncDecl {
+    pub name: String,
+    pub params: Vec<(String, AstType)>,  // Name and type of parameters
+    pub return_type: AstType,
+}
+
+// Statement (Stmt) as before with minor additions
+#[derive(Debug, Clone)]
+pub enum Stmt {
+    // Variable declaration
+    VarDecl {
+        name: String,
+        var_type: AstType,
+        init_expr: Option<Box<Expr>>,
+    },
+
+    // Block of statements
+    Block(Vec<Stmt>),
+
+    // Expression as a statement
+    ExprStmt(Box<Expr>),
+
+    // Return statement
+    Return(Box<Expr>),
+
+    // Function definition
+    FuncDef {
+        func_decl: FuncDecl, // Function declaration with params and return type
+        body: Box<Stmt>,     // Function body (a block of statements)
+    },
+
+    // loop related statements
+    Break,
+    Continue,
+
+    // External function declaration
+    FuncExternDecl {
+        func_decl: FuncDecl,
+        lib: String,
+    },
+
+    // Struct definition
+    StructDef {
+        name: String,
+        fields: Vec<(String, AstType)>,
+    },
+}
+
+// Type system with Pointers, Generics, and Aliases
 #[derive(Debug, Clone)]
 pub enum AstType {
     Int,
-    Float,
     Bool,
+    String,
     Char,
-    Array(Box<AstType>, usize),
-    Custom(String),
+    Array(Box<AstType>),
+    Struct(String),
     Void,
+
+    // Pointer type (e.g., *int)
+    Pointer(Box<AstType>),
+
+    // Generic Types (e.g., T)
+    Generic(String),
+
+    // Type Alias (e.g., type AliasName = Type;)
+    Alias(String, Box<AstType>),
 }
 
-
-#[derive(Debug, Clone)]
-pub struct Typedef {
-    pub new_type: String,
-    pub existing_type: AstType,
+// A program is a list of statements
+pub struct Program {
+    pub statements: Vec<Stmt>,
 }
 
-#[derive(Debug, Clone)]
-pub struct AstStructField {
-    pub name: String,
-    pub ty: AstType,
+// Sample utility func to print AST
+impl Program {
+    pub fn new(statements: Vec<Stmt>) -> Self {
+        Program { statements }
+    }
 }
-
-#[derive(Debug, Clone)]
-pub struct AstStruct {
-    pub name: String,
-    pub fields: Vec<AstStructField>,
-}
-
-#[derive(Debug, Clone)]
-pub struct Parameter {
-    pub name: String,
-    pub ty: AstType,
-}
-
-#[derive(Debug, Clone)]
-pub struct AstFunction {
-    pub name: String,
-    pub params: Vec<Parameter>,
-    pub return_type: AstType,
-    pub body: Vec<AstStmt>,
-}
-
-#[derive(Debug, Clone)]
-pub enum AstStmt {
-    VariableDeclaration {
-        name: String,
-        ty: AstType,
-        value: Option<AstExpr>,
-    },
-    Assignment {
-        name: String,
-        value: AstExpr,
-    },
-    Return(AstExpr),
-    If {
-        condition: AstExpr,
-        then_branch: Vec<AstStmt>,
-        else_branch: Option<Vec<AstStmt>>,
-    },
-    While {
-        condition: AstExpr,
-        body: Vec<AstStmt>,
-    },
-    Expression(AstExpr),
-}
-
-#[derive(Debug, Clone)]
-pub enum AstExpr {
-    Literal(Literal),
-    Variable(String),
-    BinaryOperation {
-        left: Box<AstExpr>,
-        operator: AstOperator,
-        right: Box<AstExpr>,
-    },
-    UnaryOperation {
-        operator: UnaryOperator,
-        operand: Box<AstExpr>,
-    },
-    FunctionCall {
-        name: String,
-        args: Vec<AstExpr>,
-    },
-    // Additional expressions can be added here
-}
-
-#[derive(Debug, Clone)]
-pub enum Literal {
-    Int(i64),
-    Float(f64),
-    Bool(bool),
-    Char(char),
-    String(String),
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum AstOperator {
-    Add,
-    Subtract,
-    Multiply,
-    Divide,
-    Modulo,
-    Equal,
-    NotEqual,
-    Less,
-    LessEqual,
-    Greater,
-    GreaterEqual,
-    And,
-    Or,
-    BitwiseAnd,
-    BitwiseOr,
-    BitwiseXor,
-    ShiftLeft,
-    ShiftRight,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum UnaryOperator {
-    Negate,
-    Not,
-    BitwiseNot,
-}
-
-// Helper type for variable mapping
-pub type VariableMap = HashMap<String, cranelift::prelude::Variable>;
