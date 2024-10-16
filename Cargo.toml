@@ -4,8 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+anyhow = "1.0.89"
 cranelift = "0.112.2"
+cranelift-codegen = "0.112.2"
 cranelift-jit = "0.112.2"
 cranelift-module = "0.112.2"
+cranelift-native = "0.112.2"
 cranelift-object = "0.112.2"
 target-lexicon = "0.12.16"

@@ -1,3 +1,5 @@
+#![allow(dead_code)] // Add this line at the top to suppress dead code warnings in this file
+
 #[derive(Debug, Clone)]
 pub enum Expr {
     // Literals
@@ -10,45 +12,32 @@ pub enum Expr {
     Variable(String),
     Assignment(String, Box<Expr>),
 
-    // Unary Operations (e.g., -x, !x, *p, &x)
+    // Unary Operations
     UnaryOp(UnaryOp, Box<Expr>),
 
-    // Binary Operations (arithmetic, comparison, logic, bitwise)
+    // Binary Operations
     BinaryOp(Box<Expr>, BinOp, Box<Expr>),
 
     // Function calls
     FuncCall(String, Vec<Expr>),
 
-    // Struct Access (e.g., myStruct.field)
+    // Struct Access
     StructAccess(Box<Expr>, String),
 
-    // Conditional expression (if-else)
-    If {
-        condition: Box<Expr>,
-        then_branch: Box<Stmt>,
-        else_branch: Option<Box<Stmt>>,
-    },
-
-    // Loops
-    While {
-        condition: Box<Expr>,
-        body: Box<Stmt>,
-    },
-
-    // Struct instantiation (e.g., MyStruct { field1: value1, field2: value2 })
+    // Struct instantiation
     StructInit {
         struct_name: String,
         fields: Vec<(String, Expr)>,
     },
 
-    // Extern calls (C func calls or dynamic libs) with return type
+    // Extern calls
     ExternCall {
         func_name: String,
         args: Vec<Expr>,
         return_type: AstType,
     },
 
-    // Match expression (pattern matching)
+    // Match expression
     Match {
         expression: Box<Expr>,
         arms: Vec<(Pattern, Stmt)>,
@@ -69,42 +58,40 @@ pub enum Expr {
 // Binary Operations
 #[derive(Debug, Clone)]
 pub enum BinOp {
-    Add,        // +
-    Subtract,   // -
-    Multiply,   // *
-    Divide,     // /
-    And,        // &&
-    Or,         // ||
-    Equal,      // ==
-    NotEqual,   // !=
-    LessThan,   // <
+    Add,         // +
+    Subtract,    // -
+    Multiply,    // *
+    Divide,      // /
+    And,         // &&
+    Or,          // ||
+    Equal,       // ==
+    NotEqual,    // !=
+    LessThan,    // <
     GreaterThan, // >
-
-    // Bitwise Operations
-    BitAnd,     // &
-    BitOr,      // |
-    BitXor,     // ^
-    ShiftLeft,  // <<
-    ShiftRight, // >>
+    BitAnd,      // &
+    BitOr,       // |
+    BitXor,      // ^
+    ShiftLeft,   // <<
+    ShiftRight,  // >>
 }
 
 // Unary Operations
 #[derive(Debug, Clone)]
 pub enum UnaryOp {
-    Negate,     // - (numeric negation)
-    Not,        // ! (logical negation)
-    Deref,      // * (dereference a pointer)
-    AddressOf,  // & (get the address of a variable)
-    BitNot,     // ~ (bitwise NOT)
+    Negate,    // - (numeric negation)
+    Not,       // ! (logical negation)
+    Deref,     // * (dereference a pointer)
+    AddressOf, // & (get the address of a variable)
+    BitNot,    // ~ (bitwise NOT)
 }
 
 // Pattern Matching
 #[derive(Debug, Clone)]
 pub enum Pattern {
-    Literal(Expr),             // Matching literals (e.g., 42)
-    Variable(String),          // Variable binding (e.g., x)
-    Wildcard,                  // Wildcard (_) pattern
-    StructPattern {            // Struct deconstruction
+    Literal(Expr), // Matching literals (e.g., 42)
+    Variable(String), // Variable binding (e.g., x)
+    Wildcard, // Wildcard (_) pattern
+    StructPattern {
         struct_name: String,
         fields: Vec<(String, Pattern)>,
     },
@@ -114,7 +101,7 @@ pub enum Pattern {
 #[derive(Debug, Clone)]
 pub struct FuncDecl {
     pub name: String,
-    pub params: Vec<(String, AstType)>,  // Name and type of parameters
+    pub params: Vec<(String, AstType)>, // Name and type of parameters
     pub return_type: AstType,
 }
 
@@ -126,6 +113,11 @@ pub enum Stmt {
         name: String,
         var_type: AstType,
         init_expr: Option<Box<Expr>>,
+    },
+
+    VarAssign {
+        name: String,
+        expr: Box<Expr>,
     },
 
     // Block of statements
@@ -143,7 +135,7 @@ pub enum Stmt {
         body: Box<Stmt>,     // Function body (a block of statements)
     },
 
-    // loop related statements
+    // Loop related statements
     Break,
     Continue,
 
@@ -157,6 +149,19 @@ pub enum Stmt {
     StructDef {
         name: String,
         fields: Vec<(String, AstType)>,
+    },
+
+    // Conditional statement
+    If {
+        condition: Box<Expr>,
+        then_branch: Box<Stmt>,
+        else_branch: Option<Box<Stmt>>,
+    },
+
+    // Loop statement
+    While {
+        condition: Box<Expr>,
+        body: Box<Stmt>,
     },
 }
 
