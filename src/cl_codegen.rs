@@ -1,6 +1,7 @@
 use anyhow::Result;
 
 use cranelift::prelude::*;
+use cranelift_codegen::ir::immediates::Offset32;
 use cranelift_module::{FuncId, Linkage, Module};
 use cranelift_jit::{JITBuilder, JITModule};
 // Removed unused imports
@@ -23,6 +24,7 @@ pub struct CodeGenerator<'a> {
     builder_context: FunctionBuilderContext,
     struct_types: HashMap<String, Vec<(String, AstType)>>, // Struct definitions
     function_ids: HashMap<String, FuncId>, // Map function names to FuncId
+    variable_types: HashMap<String, AstType>, // Change Variable to String
 }
 
 impl<'a> CodeGenerator<'a> {
@@ -32,6 +34,7 @@ impl<'a> CodeGenerator<'a> {
             builder_context: FunctionBuilderContext::new(),
             struct_types: HashMap::new(),
             function_ids: HashMap::new(),
+            variable_types: HashMap::new(),
         }
     }
 
@@ -189,6 +192,7 @@ impl<'a> CodeGenerator<'a> {
 
         builder.declare_var(var, cl_type);
         variables.insert(name.to_string(), var);
+        self.variable_types.insert(name.to_string(), var_type.clone()); // Use name instead of Variable
 
         if let Some(expr) = init_expr {
             let value = self.compile_expr(expr, Some(builder), variables)?;
@@ -387,6 +391,55 @@ impl<'a> CodeGenerator<'a> {
                         Err(anyhow::anyhow!("Undefined function `{}`", name))
                     }
                 }
+                Expr::StructInit { struct_name, fields } => {
+                    // Get struct size
+                    let struct_size = self.get_struct_size(struct_name)?;
+                    
+                    // Allocate space on stack with proper alignment (using 8 for 64-bit alignment)
+                    let stack_slot = builder.create_sized_stack_slot(StackSlotData::new(
+                        StackSlotKind::ExplicitSlot,
+                        struct_size as u32,
+                        8  // alignment
+                    ));
+                    
+                    // Initialize each field
+                    for (field_name, field_expr) in fields {
+                        // Get field offset
+                        let field_offset = self.get_struct_field_offset(struct_name, field_name)?;
+                        
+                        // Compile field value
+                        let value = self.compile_expr(field_expr, Some(builder), variables)?;
+                        
+                        // Store field value at correct offset
+                        let offset = Offset32::new(field_offset as i32);
+                        builder.ins().stack_store(value, stack_slot, offset);
+                    }
+                    
+                    // Return pointer to struct (as stack address)
+                    Ok(builder.ins().stack_addr(types::I64, stack_slot, 0))
+                },
+                Expr::StructAccess(struct_expr, field_name) => {
+                    // Get pointer to struct
+                    let struct_ptr = self.compile_expr(struct_expr, Some(builder), variables)?;
+                    
+                    // Get the struct type name from the variable's type
+                    let struct_type = if let Expr::Variable(var_name) = &**struct_expr {
+                        if let AstType::Struct(name) = &self.get_variable_type(var_name, builder)? {
+                            name.clone()
+                        } else {
+                            return Err(anyhow::anyhow!("Expected struct type"));
+                        }
+                    } else {
+                        return Err(anyhow::anyhow!("Expected struct variable"));
+                    };
+                    
+                    // Get field offset
+                    let field_offset = self.get_struct_field_offset(&struct_type, field_name)?;
+                    
+                    // Load field value
+                    let addr = builder.ins().iadd_imm(struct_ptr, field_offset as i64);
+                    Ok(builder.ins().load(types::I64, MemFlags::new(), addr, 0))
+                },
                 _ => unimplemented!("Expression {:?} not implemented", expr),
             }
         } else {
@@ -528,6 +581,15 @@ impl<'a> CodeGenerator<'a> {
             AstType::Int => Ok(types::I64),
             AstType::Bool => Ok(types::I8), // Use I8 for boolean representation
             AstType::Void => Ok(types::INVALID), // Use types::INVALID for void
+            AstType::Struct(_) => {
+                // For now, treat structs as opaque pointers (i64)
+                // This is a simplification - in a real implementation we'd want to handle the full struct layout
+                Ok(types::I64)
+            }
+            AstType::Pointer(_) => Ok(types::I64), // All pointers are 64-bit
+            AstType::Char => Ok(types::I8),
+            AstType::String => Ok(types::I64), // String is a pointer to chars
+            AstType::Array(_) => Ok(types::I64), // Array is a pointer to elements
             _ => Err(anyhow::anyhow!("Type {:?} not implemented", ast_type)),
         }
     }
@@ -549,6 +611,61 @@ impl<'a> CodeGenerator<'a> {
         }
     }
 
+    fn compile_struct_def(&mut self, name: &str, fields: &[(String, AstType)]) -> Result<()> {
+        // Store the struct definition in our struct_types map
+        self.struct_types.insert(name.to_string(), fields.to_vec());
+        Ok(())
+    }
+
+    fn get_struct_size(&self, struct_name: &str) -> Result<usize> {
+        if let Some(fields) = self.struct_types.get(struct_name) {
+            let mut total_size = 0;
+            for (_, field_type) in fields {
+                total_size += self.get_type_size(field_type)?;
+            }
+            Ok(total_size)
+        } else {
+            Err(anyhow::anyhow!("Undefined struct: {}", struct_name))
+        }
+    }
+
+    fn get_type_size(&self, ast_type: &AstType) -> Result<usize> {
+        match ast_type {
+            AstType::Int => Ok(8),  // 64-bit integer
+            AstType::Bool => Ok(1), // 8-bit boolean
+            AstType::Char => Ok(1), // 8-bit char
+            AstType::String => Ok(16), // Pointer (8) + length (8)
+            AstType::Pointer(_) => Ok(8), // 64-bit pointer
+            AstType::Struct(name) => self.get_struct_size(name),
+            AstType::Array(elem_type) => {
+                // For simplicity, we'll assume fixed-size arrays of 8 elements
+                Ok(self.get_type_size(elem_type)? * 8)
+            }
+            AstType::Void => Ok(0),
+            _ => Err(anyhow::anyhow!("Unsupported type for size calculation: {:?}", ast_type))
+        }
+    }
+
+    fn get_struct_field_offset(&self, struct_name: &str, field_name: &str) -> Result<usize> {
+        if let Some(fields) = self.struct_types.get(struct_name) {
+            let mut offset = 0;
+            for (name, field_type) in fields {
+                if name == field_name {
+                    return Ok(offset);
+                }
+                offset += self.get_type_size(field_type)?;
+            }
+            Err(anyhow::anyhow!("Field {} not found in struct {}", field_name, struct_name))
+        } else {
+            Err(anyhow::anyhow!("Undefined struct: {}", struct_name))
+        }
+    }
+
+    fn get_variable_type(&self, name: &str, builder: &FunctionBuilder) -> Result<AstType> {
+        self.variable_types.get(name)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Type not found for variable {}", name))
+    }
 }
 
 #[cfg(test)]
@@ -1044,7 +1161,119 @@ mod tests {
         let result: i64 = run_code(&mut module, func_id);
         assert_eq!(result, 10);
     }
+
+    #[test]
+    fn test_struct_definition() {
+        let isa = cranelift_native::builder()
+            .unwrap()
+            .finish(settings::Flags::new(settings::builder()))
+            .unwrap();
+        let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        let mut module = JITModule::new(builder);
+
+        let mut codegen = CodeGenerator::new(&mut module);
+
+        // Define a struct
+        let fields = vec![
+            ("x".to_string(), AstType::Int),
+            ("y".to_string(), AstType::Int),
+            ("valid".to_string(), AstType::Bool),
+        ];
+
+        assert!(codegen.compile_struct_def("Point", &fields).is_ok());
+
+        // Test struct size calculation
+        assert_eq!(codegen.get_struct_size("Point").unwrap(), 17); // 8 + 8 + 1
+
+        // Test field offset calculation
+        assert_eq!(codegen.get_struct_field_offset("Point", "x").unwrap(), 0);
+        assert_eq!(codegen.get_struct_field_offset("Point", "y").unwrap(), 8);
+        assert_eq!(codegen.get_struct_field_offset("Point", "valid").unwrap(), 16);
+    }
+
+    #[test]
+    fn test_struct_access_and_assignment() {
+        let isa = cranelift_native::builder()
+            .unwrap()
+            .finish(settings::Flags::new(settings::builder()))
+            .unwrap();
+        let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        let mut module = JITModule::new(builder);
+
+        let func_id;
+
+        {
+            let mut codegen = CodeGenerator::new(&mut module);
+
+            // Define the Point struct
+            let fields = vec![
+                ("x".to_string(), AstType::Int),
+                ("y".to_string(), AstType::Int),
+            ];
+            codegen.compile_struct_def("Point", &fields).unwrap();
+
+            // Create a program that creates and uses a Point
+            let prog = Program::new(vec![
+                // Declare a Point variable
+                Stmt::VarDecl {
+                    name: "p".to_string(),
+                    var_type: AstType::Struct("Point".to_string()),
+                    init_expr: Some(Box::new(Expr::StructInit {
+                        struct_name: "Point".to_string(),
+                        fields: vec![
+                            ("x".to_string(), Expr::IntLiteral(10)),
+                            ("y".to_string(), Expr::IntLiteral(20)),
+                        ],
+                    })),
+                },
+                // Return p.x + p.y
+                Stmt::Return(Box::new(Expr::BinaryOp(
+                    Box::new(Expr::StructAccess(
+                        Box::new(Expr::Variable("p".to_string())),
+                        "x".to_string(),
+                    )),
+                    BinOp::Add,
+                    Box::new(Expr::StructAccess(
+                        Box::new(Expr::Variable("p".to_string())),
+                        "y".to_string(),
+                    )),
+                ))),
+            ]);
+
+            codegen.compile_program(&prog).expect("Compilation failed");
+            func_id = codegen.get_function_id("main").unwrap();
+        }
+
+        // Execute the compiled code
+        let result: i64 = run_code(&mut module, func_id);
+        assert_eq!(result, 30); // 10 + 20
+    }
+
+    #[test]
+    fn test_type_sizes() {
+        let isa = cranelift_native::builder()
+            .unwrap()
+            .finish(settings::Flags::new(settings::builder()))
+            .unwrap();
+        let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        let mut module = JITModule::new(builder);
+
+        let codegen = CodeGenerator::new(&mut module);
+
+        assert_eq!(codegen.get_type_size(&AstType::Int).unwrap(), 8);
+        assert_eq!(codegen.get_type_size(&AstType::Bool).unwrap(), 1);
+        assert_eq!(codegen.get_type_size(&AstType::Char).unwrap(), 1);
+        assert_eq!(codegen.get_type_size(&AstType::String).unwrap(), 16);
+        assert_eq!(codegen.get_type_size(&AstType::Pointer(Box::new(AstType::Int))).unwrap(), 8);
+    }
 }
+
+
+
+
+
+
+
 
 
 

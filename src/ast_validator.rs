@@ -5,12 +5,14 @@ use std::collections::HashMap;
 
 pub struct AstValidator {
     symbol_table: HashMap<String, AstType>,
+    struct_definitions: HashMap<String, Vec<(String, AstType)>>, // Add this field
 }
 
 impl AstValidator {
     pub fn new() -> Self {
         Self {
             symbol_table: HashMap::new(),
+            struct_definitions: HashMap::new(),
         }
     }
 
@@ -234,6 +236,50 @@ impl AstValidator {
         // Implementation here
         Ok(AstType::Int) // Or whatever appropriate return type
     }
+
+    // Add these methods
+    fn validate_struct_def(&mut self, name: &str, fields: &[(String, AstType)]) -> Result<()> {
+        // Check for duplicate field names
+        let mut field_names = std::collections::HashSet::new();
+        for (field_name, field_type) in fields {
+            if !field_names.insert(field_name) {
+                return Err(anyhow::anyhow!("Duplicate field name '{}' in struct '{}'", field_name, name));
+            }
+            
+            // Validate that the field type is valid
+            self.validate_type(field_type)?;
+        }
+
+        // Store the struct definition
+        self.struct_definitions.insert(name.to_string(), fields.to_vec());
+        Ok(())
+    }
+
+    fn validate_type(&self, ast_type: &AstType) -> Result<()> {
+        match ast_type {
+            AstType::Struct(name) => {
+                if !self.struct_definitions.contains_key(name) {
+                    return Err(anyhow::anyhow!("Undefined struct type: {}", name));
+                }
+            }
+            AstType::Array(elem_type) => {
+                self.validate_type(elem_type)?;
+            }
+            AstType::Pointer(pointed_type) => {
+                self.validate_type(pointed_type)?;
+            }
+            AstType::Function(param_types, return_type) => {
+                for param_type in param_types {
+                    self.validate_type(param_type)?;
+                }
+                self.validate_type(return_type)?;
+            }
+            // Basic types are always valid
+            AstType::Int | AstType::Bool | AstType::String | AstType::Char | AstType::Void => {}
+            _ => return Err(anyhow::anyhow!("Unsupported type: {:?}", ast_type)),
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -367,6 +413,82 @@ mod tests {
             Stmt::VarAssign {
                 name: "x".to_string(),
                 expr: Box::new(Expr::BoolLiteral(true)), // Type mismatch
+            },
+        ]);
+
+        assert!(validator.validate_program(&program).is_err());
+    }
+
+    #[test]
+    fn test_valid_struct_definition() {
+        let mut validator = AstValidator::new();
+        let program = create_test_program(vec![
+            Stmt::StructDef {
+                name: "Point".to_string(),
+                fields: vec![
+                    ("x".to_string(), AstType::Int),
+                    ("y".to_string(), AstType::Int),
+                ],
+            },
+        ]);
+
+        assert!(validator.validate_program(&program).is_ok());
+    }
+
+    #[test]
+    fn test_invalid_struct_duplicate_fields() {
+        let mut validator = AstValidator::new();
+        let program = create_test_program(vec![
+            Stmt::StructDef {
+                name: "Point".to_string(),
+                fields: vec![
+                    ("x".to_string(), AstType::Int),
+                    ("x".to_string(), AstType::Int), // Duplicate field name
+                ],
+            },
+        ]);
+
+        assert!(validator.validate_program(&program).is_err());
+    }
+
+    #[test]
+    fn test_struct_usage() {
+        let mut validator = AstValidator::new();
+        let program = create_test_program(vec![
+            // Define the struct
+            Stmt::StructDef {
+                name: "Point".to_string(),
+                fields: vec![
+                    ("x".to_string(), AstType::Int),
+                    ("y".to_string(), AstType::Int),
+                ],
+            },
+            // Use the struct
+            Stmt::VarDecl {
+                name: "p".to_string(),
+                var_type: AstType::Struct("Point".to_string()),
+                init_expr: Some(Box::new(Expr::StructInit {
+                    struct_name: "Point".to_string(),
+                    fields: vec![
+                        ("x".to_string(), Expr::IntLiteral(10)),
+                        ("y".to_string(), Expr::IntLiteral(20)),
+                    ],
+                })),
+            },
+        ]);
+
+        assert!(validator.validate_program(&program).is_ok());
+    }
+
+    #[test]
+    fn test_invalid_struct_usage() {
+        let mut validator = AstValidator::new();
+        let program = create_test_program(vec![
+            // Try to use undefined struct
+            Stmt::VarDecl {
+                name: "p".to_string(),
+                var_type: AstType::Struct("Point".to_string()), // Undefined struct
+                init_expr: None,
             },
         ]);
 
