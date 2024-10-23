@@ -1,4 +1,4 @@
-#![allow(dead_code)] // Add this line at the top to suppress dead code warnings in this file
+// ast.rs
 
 #[derive(Debug, Clone)]
 pub enum Expr {
@@ -62,6 +62,7 @@ pub enum BinOp {
     Subtract,    // -
     Multiply,    // *
     Divide,      // /
+    Modulus,     // %   // Added modulus operator
     And,         // &&
     Or,          // ||
     Equal,       // ==
@@ -166,7 +167,7 @@ pub enum Stmt {
 }
 
 // Type system with Pointers, Generics, and Aliases
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum AstType {
     Int,
     Bool,
@@ -184,6 +185,8 @@ pub enum AstType {
 
     // Type Alias (e.g., type AliasName = Type;)
     Alias(String, Box<AstType>),
+
+    Function(Vec<AstType>, Box<AstType>), // (parameter_types, return_type)
 }
 
 // A program is a list of statements
