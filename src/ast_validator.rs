@@ -26,6 +26,9 @@ impl AstValidator {
     fn validate_stmt(&mut self, stmt: &Stmt) -> Result<()> {
         match stmt {
             Stmt::VarDecl { name, var_type, init_expr } => {
+                // First validate that the type itself is valid
+                self.validate_type(var_type)?;
+                
                 if let Some(expr) = init_expr {
                     let expr_type = self.validate_expr(expr)?;
                     if expr_type != *var_type {
@@ -37,6 +40,7 @@ impl AstValidator {
                     }
                 }
                 self.symbol_table.insert(name.clone(), var_type.clone());
+                Ok(())
             }
             Stmt::VarAssign { name, expr } => {
                 let expr_type = self.validate_expr(expr)?;
@@ -48,27 +52,31 @@ impl AstValidator {
                             name, var_type, expr_type
                         ));
                     }
+                    Ok(())
                 } else {
-                    return Err(anyhow::anyhow!(
+                    Err(anyhow::anyhow!(
                         "Undefined variable '{}'. Did you forget to declare it?",
                         name
-                    ));
+                    ))
                 }
             }
             Stmt::ExprStmt(expr) => {
                 self.validate_expr(expr)?;
+                Ok(())
             }
             Stmt::Return(expr) => {
                 self.validate_expr(expr)?;
+                Ok(())
             }
             Stmt::Block(stmts) => {
                 for stmt in stmts {
                     self.validate_stmt(stmt)?;
                 }
+                Ok(())
             }
             Stmt::FuncDef { func_decl, body } => {
                 // Validate function signature and body
-                self.validate_func_def(func_decl, body)?;
+                self.validate_func_def(func_decl, body)
             }
             Stmt::If { condition, then_branch, else_branch } => {
                 let cond_type = self.validate_expr(condition)?;
@@ -79,6 +87,7 @@ impl AstValidator {
                 if let Some(else_stmt) = else_branch {
                     self.validate_stmt(else_stmt)?;
                 }
+                Ok(())
             }
             Stmt::While { condition, body } => {
                 let cond_type = self.validate_expr(condition)?;
@@ -86,10 +95,21 @@ impl AstValidator {
                     return Err(anyhow::anyhow!("Condition must be a boolean"));
                 }
                 self.validate_stmt(body)?;
+                Ok(())
             }
+            Stmt::StructDef { name, fields } => {
+                // Validate the struct definition
+                self.validate_struct_def(name, fields)?;
+                
+                // Also add the struct type to the symbol table
+                self.symbol_table.insert(
+                    name.clone(), 
+                    AstType::Struct(name.clone())
+                );
+                Ok(())
+            },
             _ => unimplemented!("Statement {:?} not implemented", stmt),
         }
-        Ok(())
     }
 
     fn validate_expr(&mut self, expr: &Expr) -> Result<AstType> {
@@ -211,6 +231,80 @@ impl AstValidator {
                     ))
                 }
             }
+            Expr::StructInit { struct_name, fields } => {
+                // Check if struct exists
+                let struct_fields = if let Some(sf) = self.struct_definitions.get(struct_name) {
+                    sf.clone() // Clone the fields to avoid borrow conflicts
+                } else {
+                    return Err(anyhow::anyhow!("Undefined struct '{}'", struct_name));
+                };
+
+                // Check if all required fields are present
+                let mut provided_fields = std::collections::HashSet::new();
+                
+                // Validate all fields first
+                for (field_name, field_expr) in fields {
+                    // Check for duplicate fields in initialization
+                    if !provided_fields.insert(field_name) {
+                        return Err(anyhow::anyhow!(
+                            "Duplicate field '{}' in struct initialization",
+                            field_name
+                        ));
+                    }
+                    
+                    // Find the field in struct definition
+                    if let Some((_, expected_type)) = struct_fields.iter()
+                        .find(|(name, _)| name == field_name) {
+                        let provided_type = self.validate_expr(field_expr)?;
+                        if provided_type != *expected_type {
+                            return Err(anyhow::anyhow!(
+                                "Type mismatch in field '{}': expected {:?}, got {:?}",
+                                field_name, expected_type, provided_type
+                            ));
+                        }
+                    } else {
+                        return Err(anyhow::anyhow!(
+                            "Unknown field '{}' in struct '{}'",
+                            field_name, struct_name
+                        ));
+                    }
+                }
+                
+                // Check if all fields are initialized
+                if fields.len() != struct_fields.len() {
+                    return Err(anyhow::anyhow!(
+                        "Not all fields initialized for struct '{}'",
+                        struct_name
+                    ));
+                }
+                
+                Ok(AstType::Struct(struct_name.clone()))
+            },
+
+            Expr::StructAccess(struct_expr, field_name) => {
+                let struct_type = self.validate_expr(struct_expr)?;
+                if let AstType::Struct(struct_name) = struct_type {
+                    if let Some(struct_fields) = self.struct_definitions.get(&struct_name) {
+                        if let Some((_, field_type)) = struct_fields.iter()
+                            .find(|(name, _)| name == field_name) {
+                            Ok(field_type.clone())
+                        } else {
+                            Err(anyhow::anyhow!(
+                                "Field '{}' not found in struct '{}'",
+                                field_name, struct_name
+                            ))
+                        }
+                    } else {
+                        Err(anyhow::anyhow!("Undefined struct '{}'", struct_name))
+                    }
+                } else {
+                    Err(anyhow::anyhow!(
+                        "Cannot access field '{}' of non-struct type {:?}",
+                        field_name, struct_type
+                    ))
+                }
+            },
+
             _ => unimplemented!("Expression {:?} not implemented", expr),
         }
     }

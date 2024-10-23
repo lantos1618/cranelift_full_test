@@ -4,7 +4,6 @@ use cranelift::prelude::*;
 use cranelift_codegen::ir::immediates::Offset32;
 use cranelift_module::{FuncId, Linkage, Module};
 use cranelift_jit::{JITBuilder, JITModule};
-// Removed unused imports
 
 use crate::ast::*;
 
@@ -13,9 +12,10 @@ use std::mem::transmute;
 
 
 // Define LoopContext struct
-struct LoopContext {
-    header_block: Block,
-    exit_block: Block,
+#[derive(Debug)]
+pub struct LoopContext {
+    pub header_block: Block,
+    pub exit_block: Block,
 }
 
 
@@ -422,15 +422,25 @@ impl<'a> CodeGenerator<'a> {
                     // Get pointer to struct
                     let struct_ptr = self.compile_expr(struct_expr, Some(builder), variables)?;
                     
-                    // Get the struct type name from the variable's type
-                    let struct_type = if let Expr::Variable(var_name) = &**struct_expr {
-                        if let AstType::Struct(name) = &self.get_variable_type(var_name, builder)? {
-                            name.clone()
-                        } else {
-                            return Err(anyhow::anyhow!("Expected struct type"));
+                    // Get the struct type name
+                    let struct_type = match &**struct_expr {
+                        Expr::Variable(var_name) => {
+                            // Direct variable access
+                            if let AstType::Struct(name) = &self.get_variable_type(var_name, builder)? {
+                                name.clone()
+                            } else {
+                                return Err(anyhow::anyhow!("Expected struct type for variable {}", var_name));
+                            }
                         }
-                    } else {
-                        return Err(anyhow::anyhow!("Expected struct variable"));
+                        Expr::StructAccess(inner_struct, inner_field) => {
+                            // Nested struct access
+                            if let AstType::Struct(name) = self.get_field_type(inner_struct, inner_field, builder)? {
+                                name
+                            } else {
+                                return Err(anyhow::anyhow!("Expected struct type for field {}", inner_field));
+                            }
+                        }
+                        _ => return Err(anyhow::anyhow!("Expected struct variable or field access")),
                     };
                     
                     // Get field offset
@@ -661,16 +671,56 @@ impl<'a> CodeGenerator<'a> {
         }
     }
 
-    fn get_variable_type(&self, name: &str, builder: &FunctionBuilder) -> Result<AstType> {
+    fn get_variable_type(&self, name: &str, _builder: &FunctionBuilder) -> Result<AstType> {
         self.variable_types.get(name)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("Type not found for variable {}", name))
+    }
+
+    fn get_field_type(&self, struct_expr: &Box<Expr>, field_name: &str, builder: &FunctionBuilder) -> Result<AstType> {
+        match &**struct_expr {
+            Expr::Variable(var_name) => {
+                if let AstType::Struct(struct_name) = &self.get_variable_type(var_name, builder)? {
+                    if let Some(fields) = self.struct_types.get(struct_name) {
+                        if let Some((_, field_type)) = fields.iter().find(|(name, _)| name == field_name) {
+                            Ok(field_type.clone())
+                        } else {
+                            Err(anyhow::anyhow!("Field {} not found in struct {}", field_name, struct_name))
+                        }
+                    } else {
+                        Err(anyhow::anyhow!("Struct {} not found", struct_name))
+                    }
+                } else {
+                    Err(anyhow::anyhow!("Expected struct type"))
+                }
+            }
+            Expr::StructAccess(inner_struct, inner_field) => {
+                // Recursively get the type for nested access
+                let inner_type = self.get_field_type(inner_struct, inner_field, builder)?;
+                if let AstType::Struct(struct_name) = inner_type {
+                    if let Some(fields) = self.struct_types.get(&struct_name) {
+                        if let Some((_, field_type)) = fields.iter().find(|(name, _)| name == field_name) {
+                            Ok(field_type.clone())
+                        } else {
+                            Err(anyhow::anyhow!("Field {} not found in struct {}", field_name, struct_name))
+                        }
+                    } else {
+                        Err(anyhow::anyhow!("Struct {} not found", struct_name))
+                    }
+                } else {
+                    Err(anyhow::anyhow!("Expected struct type"))
+                }
+            }
+            _ => Err(anyhow::anyhow!("Expected struct variable or field access")),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cranelift_jit::JITBuilder;
+    use std::mem::transmute;
 
     // Helper function to run code
     fn run_code<T>(module: &mut JITModule, func_id: FuncId) -> T {
@@ -1266,7 +1316,168 @@ mod tests {
         assert_eq!(codegen.get_type_size(&AstType::String).unwrap(), 16);
         assert_eq!(codegen.get_type_size(&AstType::Pointer(Box::new(AstType::Int))).unwrap(), 8);
     }
+
+    #[test]
+    fn test_nested_struct() {
+        let isa = cranelift_native::builder()
+            .unwrap()
+            .finish(settings::Flags::new(settings::builder()))
+            .unwrap();
+        let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        let mut module = JITModule::new(builder);
+
+        let func_id;
+
+        {
+            let mut codegen = CodeGenerator::new(&mut module);
+
+            // Define the inner Point struct
+            let point_fields = vec![
+                ("x".to_string(), AstType::Int),
+                ("y".to_string(), AstType::Int),
+            ];
+            codegen.compile_struct_def("Point", &point_fields).unwrap();
+
+            // Define the Rectangle struct that contains two Points
+            let rect_fields = vec![
+                ("top_left".to_string(), AstType::Struct("Point".to_string())),
+                ("bottom_right".to_string(), AstType::Struct("Point".to_string())),
+            ];
+            codegen.compile_struct_def("Rectangle", &rect_fields).unwrap();
+
+            // Create a program that uses nested structs
+            let prog = Program::new(vec![
+                // Create a rectangle
+                Stmt::VarDecl {
+                    name: "rect".to_string(),
+                    var_type: AstType::Struct("Rectangle".to_string()),
+                    init_expr: Some(Box::new(Expr::StructInit {
+                        struct_name: "Rectangle".to_string(),
+                        fields: vec![
+                            ("top_left".to_string(), Expr::StructInit {
+                                struct_name: "Point".to_string(),
+                                fields: vec![
+                                    ("x".to_string(), Expr::IntLiteral(0)),
+                                    ("y".to_string(), Expr::IntLiteral(10)),
+                                ],
+                            }),
+                            ("bottom_right".to_string(), Expr::StructInit {
+                                struct_name: "Point".to_string(),
+                                fields: vec![
+                                    ("x".to_string(), Expr::IntLiteral(20)),
+                                    ("y".to_string(), Expr::IntLiteral(0)),
+                                ],
+                            }),
+                        ],
+                    })),
+                },
+                // Calculate and return width * height
+                Stmt::Return(Box::new(Expr::BinaryOp(
+                    Box::new(Expr::BinaryOp(
+                        Box::new(Expr::StructAccess(
+                            Box::new(Expr::StructAccess(
+                                Box::new(Expr::Variable("rect".to_string())),
+                                "bottom_right".to_string(),
+                            )),
+                            "x".to_string(),
+                        )),
+                        BinOp::Subtract,
+                        Box::new(Expr::StructAccess(
+                            Box::new(Expr::StructAccess(
+                                Box::new(Expr::Variable("rect".to_string())),
+                                "top_left".to_string(),
+                            )),
+                            "x".to_string(),
+                        )),
+                    )),
+                    BinOp::Multiply,
+                    Box::new(Expr::BinaryOp(
+                        Box::new(Expr::StructAccess(
+                            Box::new(Expr::StructAccess(
+                                Box::new(Expr::Variable("rect".to_string())),
+                                "top_left".to_string(),
+                            )),
+                            "y".to_string(),
+                        )),
+                        BinOp::Subtract,
+                        Box::new(Expr::StructAccess(
+                            Box::new(Expr::StructAccess(
+                                Box::new(Expr::Variable("rect".to_string())),
+                                "bottom_right".to_string(),
+                            )),
+                            "y".to_string(),
+                        )),
+                    )),
+                ))),
+            ]);
+
+            codegen.compile_program(&prog).expect("Compilation failed");
+            func_id = codegen.get_function_id("main").unwrap();
+        }
+
+        // Execute the compiled code
+        let result: i64 = run_code(&mut module, func_id);
+        assert_eq!(result, 200); // width (20-0) * height (10-0) = 20 * 10 = 200
+    }
+
+    #[test]
+    fn test_struct_array() {
+        let isa = cranelift_native::builder()
+            .unwrap()
+            .finish(settings::Flags::new(settings::builder()))
+            .unwrap();
+        let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        let mut module = JITModule::new(builder);
+
+        let mut codegen = CodeGenerator::new(&mut module);
+
+        // Define a struct with an array field
+        let fields = vec![
+            ("data".to_string(), AstType::Array(Box::new(AstType::Int))),
+            ("length".to_string(), AstType::Int),
+        ];
+
+        assert!(codegen.compile_struct_def("IntArray", &fields).is_ok());
+
+        // Test struct size calculation (8 * 8 for array + 8 for length)
+        assert_eq!(codegen.get_struct_size("IntArray").unwrap(), 72);
+    }
+
+    #[test]
+    fn test_complex_struct() {
+        let isa = cranelift_native::builder()
+            .unwrap()
+            .finish(settings::Flags::new(settings::builder()))
+            .unwrap();
+        let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        let mut module = JITModule::new(builder);
+
+        let mut codegen = CodeGenerator::new(&mut module);
+
+        // Define a complex struct with multiple types
+        let fields = vec![
+            ("name".to_string(), AstType::String),
+            ("age".to_string(), AstType::Int),
+            ("is_active".to_string(), AstType::Bool),
+            ("points".to_string(), AstType::Array(Box::new(AstType::Int))),
+            ("next".to_string(), AstType::Pointer(Box::new(AstType::Struct("Person".to_string())))),
+        ];
+
+        assert!(codegen.compile_struct_def("Person", &fields).is_ok());
+
+        // Test struct size calculation
+        // String (16) + Int (8) + Bool (1) + Array (64) + Pointer (8) = 97
+        assert_eq!(codegen.get_struct_size("Person").unwrap(), 97);
+
+        // Test field offsets
+        assert_eq!(codegen.get_struct_field_offset("Person", "name").unwrap(), 0);
+        assert_eq!(codegen.get_struct_field_offset("Person", "age").unwrap(), 16);
+        assert_eq!(codegen.get_struct_field_offset("Person", "is_active").unwrap(), 24);
+        assert_eq!(codegen.get_struct_field_offset("Person", "points").unwrap(), 25);
+        assert_eq!(codegen.get_struct_field_offset("Person", "next").unwrap(), 89);
+    }
 }
+
 
 
 
