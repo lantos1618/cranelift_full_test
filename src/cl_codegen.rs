@@ -734,9 +734,6 @@ mod tests {
         unsafe { transmute::<_, fn() -> T>(code)() }
     }
 
-    // Your tests go here...
-
-
     #[test]
     fn test_integer_literal() {
         // Setup the ISA and JIT module
