@@ -152,7 +152,7 @@ impl<'a> CodeGenerator<'a> {
             Stmt::FuncDef { func_decl, body } => {
                 self.compile_func_def(func_decl, body)?;
             }
-            Stmt::FuncExternDecl { func_decl, lib: _ } => {
+            Stmt::FuncExternDecl { name: func_decl, lib: _ } => {
                 self.compile_func_extern_decl(func_decl)?;
             }
             Stmt::StructDef { name, fields } => {

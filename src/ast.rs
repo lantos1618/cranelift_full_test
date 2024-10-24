@@ -142,7 +142,7 @@ pub enum Stmt {
 
     // External function declaration
     FuncExternDecl {
-        func_decl: FuncDecl,
+        name: FuncDecl,
         lib: String,
     },
 

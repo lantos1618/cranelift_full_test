@@ -1,7 +1,7 @@
 use std::iter::Peekable;
 use std::vec::IntoIter;
 use crate::token::Token;
-use crate::ast::{Expr, Stmt, Program, BinOp, AstType};
+use crate::ast::{Expr, Stmt, Program, BinOp, AstType, FuncDecl};
 
 pub struct Parser {
     tokens: Peekable<IntoIter<Token>>,
@@ -115,13 +115,18 @@ impl Parser {
         let params = self.parse_parameters();
         let return_type = self.parse_return_type();
 
+        // Create the function declaration
+        let func_decl = FuncDecl {
+            name,
+            params,
+            return_type,
+        };
+
         // Parse function body
         let body = self.parse_block();
 
         Stmt::FuncDef {
-            name,
-            params,
-            return_type,
+            func_decl,
             body: Box::new(body),
         }
     }
