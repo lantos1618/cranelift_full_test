@@ -591,9 +591,11 @@ impl<'a> CodeGenerator<'a> {
             AstType::Int => Ok(types::I64),
             AstType::Bool => Ok(types::I8), // Use I8 for boolean representation
             AstType::Void => Ok(types::INVALID), // Use types::INVALID for void
-            AstType::Struct(_) => {
-                // For now, treat structs as opaque pointers (i64)
-                // This is a simplification - in a real implementation we'd want to handle the full struct layout
+            AstType::Struct(name) => {
+                // Calculate the size of the struct
+                let struct_size = self.get_struct_size(name)?;
+                // Use a custom type or a pointer to represent the struct
+                // For simplicity, we can still use I64 as a pointer to the struct
                 Ok(types::I64)
             }
             AstType::Pointer(_) => Ok(types::I64), // All pointers are 64-bit

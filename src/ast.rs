@@ -1,6 +1,6 @@
 // ast.rs
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     // Literals
     IntLiteral(i64),
@@ -56,7 +56,7 @@ pub enum Expr {
 }
 
 // Binary Operations
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum BinOp {
     Add,         // +
     Subtract,    // -
@@ -77,7 +77,7 @@ pub enum BinOp {
 }
 
 // Unary Operations
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum UnaryOp {
     Negate,    // - (numeric negation)
     Not,       // ! (logical negation)
@@ -87,7 +87,7 @@ pub enum UnaryOp {
 }
 
 // Pattern Matching
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Pattern {
     Literal(Expr), // Matching literals (e.g., 42)
     Variable(String), // Variable binding (e.g., x)
@@ -99,7 +99,7 @@ pub enum Pattern {
 }
 
 // Function declaration with types for parameters
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq    )]
 pub struct FuncDecl {
     pub name: String,
     pub params: Vec<(String, AstType)>, // Name and type of parameters
@@ -107,7 +107,7 @@ pub struct FuncDecl {
 }
 
 // Statement (Stmt) as before with minor additions
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
     // Variable declaration
     VarDecl {
@@ -189,7 +189,7 @@ pub enum AstType {
     Function(Vec<AstType>, Box<AstType>), // (parameter_types, return_type)
 }
 
-// A program is a list of statements
+#[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     pub statements: Vec<Stmt>,
 }
