@@ -1,0 +1,36 @@
+Build = @zen.Build
+
+
+build(b: Build) {
+
+    // add the main.zen file to executable
+    exe = b.add_executable(
+        name = "example",
+        main = "main.zen",
+        source_dir = "src",
+        target = b.host()
+    )
+
+    // add packages
+    exe.add_packages([
+        {
+            package = "openai",
+            version = "0.1.0",
+            git_url = "https://github.com/lantos1618/openai",
+        },
+        {
+            package = "sdl2",
+            version = "0.1.0",
+            git_url = "https://github.com/lantos1618/sdl2",
+        }
+    ])
+
+    exe.link_libraries([
+        "openai",
+        "sdl2",
+    ])
+
+    compiled = b.compile_run(exe)
+
+    b.run(compiled)
+}

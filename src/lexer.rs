@@ -8,10 +8,9 @@ pub struct Lexer<'a> {
 
 impl<'a> Lexer<'a> {
     pub fn new(input: &'a str) -> Self {
-        let lexer = Lexer {
+        Lexer {
             input: input.chars().peekable(),
-        };
-        lexer
+        }
     }
 
     fn advance(&mut self) -> Option<char> {
@@ -43,6 +42,14 @@ impl<'a> Lexer<'a> {
                     tokens.push(Token::CloseParen);
                     self.advance();
                 }
+                '[' => {
+                    tokens.push(Token::OpenBracket);
+                    self.advance();
+                }
+                ']' => {
+                    tokens.push(Token::CloseBracket);
+                    self.advance();
+                }
                 ',' => {
                     tokens.push(Token::Comma);
                     self.advance();
@@ -51,9 +58,18 @@ impl<'a> Lexer<'a> {
                     tokens.push(Token::Colon);
                     self.advance();
                 }
+                ';' => {
+                    tokens.push(Token::Semicolon);
+                    self.advance();
+                }
+                '.' => {
+                    tokens.push(Token::Dot);
+                    self.advance();
+                }
                 '=' => {
+                    self.advance();
                     if self.peek() == Some(&'>') {
-                        tokens.push(Token::Arrow);
+                        tokens.push(Token::FatArrow);
                         self.advance();
                     } else {
                         tokens.push(Token::Equal);
@@ -186,14 +202,18 @@ impl<'a> Lexer<'a> {
         }
 
         match ident.as_str() {
-            "do" => Token::Do,
-            "match" => Token::Match,
+            "fn" => Token::Fn,
+            "let" => Token::Let,
             "if" => Token::If,
             "else" => Token::Else,
-            "while" => Token::While,
-            "for" => Token::For,
-            "return" => Token::Return,
+            "match" => Token::Match,
             "loop" => Token::Loop,
+            "return" => Token::Return,
+            "struct" => Token::Struct,
+            "None" => Token::None,
+            "Some" => Token::Some,
+            "Option" => Token::Option,
+            "Mut" => Token::Mut,
             _ => Token::Identifier(ident),
         }
     }

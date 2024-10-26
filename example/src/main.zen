@@ -1,0 +1,60 @@
+zen = @zen
+
+
+Node = {
+    value: int,
+    next: Option<Node>,
+}
+
+LinkedList = {
+    head: Mut<Option<Node>>,
+    alloc: Alloc,
+}
+
+create_list(alloc: Alloc) -> LinkedList {
+    return LinkedList{
+        head = Mut(None),
+        alloc = alloc,
+    }
+}
+
+push_front(list: LinkedList, value: int) {
+    new_node = Node{
+        value = value,
+        next = list.head.get(),
+    }
+    list.head.set(Some(new_node))
+}
+
+pop_front(list: LinkedList) -> Option<int> {
+    match(list.head.get()) {
+        None => None,
+        Some => (node) {
+            list.head.set(node.next)
+            Some(node.value)
+        }
+    }
+}
+
+fib_iterative(n: int) {
+    a = 0
+    b = 1
+    loop (0, n, {
+        a = b
+        b = a + b   
+    })
+    return a
+}
+
+fib_recursive(n: int) {
+    if(n) {
+        0, 1 => n
+        _ => fib_recursive(n - 1) + fib_recursive(n - 2)
+    }
+}
+
+main() { 
+    alloc =  Alloc()
+    println!("Hello, world!");
+}
+
