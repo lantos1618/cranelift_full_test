@@ -1,154 +1,181 @@
-use crate::token::Token;
+use crate::token::{Token, TokenKind};
+use crate::error::{CompilerError, ErrorType};
 use std::str::Chars;
 use std::iter::Peekable;
 
 pub struct Lexer<'a> {
     input: Peekable<Chars<'a>>,
+    line: usize,
+    column: usize,
+    source: &'a str,
 }
 
 impl<'a> Lexer<'a> {
     pub fn new(input: &'a str) -> Self {
         Lexer {
             input: input.chars().peekable(),
+            line: 1,
+            column: 1,
+            source: input,
         }
     }
 
     fn advance(&mut self) -> Option<char> {
-        self.input.next()
+        let c = self.input.next();
+        if let Some(ch) = c {
+            if ch == '\n' {
+                self.line += 1;
+                self.column = 1;
+            } else {
+                self.column += 1;
+            }
+        }
+        c
     }
 
     fn peek(&mut self) -> Option<&char> {
         self.input.peek()
     }
 
-    pub fn tokenize(&mut self) -> Vec<Token> {
+    pub fn tokenize(&mut self) -> Result<Vec<Token>, CompilerError> {
         let mut tokens = Vec::new();
 
         while let Some(&c) = self.peek() {
-            match c {
+            let start_column = self.column;
+            let token_kind = match c {
                 '{' => {
-                    tokens.push(Token::OpenBrace);
                     self.advance();
+                    TokenKind::OpenBrace
                 }
                 '}' => {
-                    tokens.push(Token::CloseBrace);
                     self.advance();
+                    TokenKind::CloseBrace
                 }
                 '(' => {
-                    tokens.push(Token::OpenParen);
                     self.advance();
+                    TokenKind::OpenParen
                 }
                 ')' => {
-                    tokens.push(Token::CloseParen);
                     self.advance();
+                    TokenKind::CloseParen
                 }
                 '[' => {
-                    tokens.push(Token::OpenBracket);
                     self.advance();
+                    TokenKind::OpenBracket
                 }
                 ']' => {
-                    tokens.push(Token::CloseBracket);
                     self.advance();
+                    TokenKind::CloseBracket
                 }
                 ',' => {
-                    tokens.push(Token::Comma);
                     self.advance();
+                    TokenKind::Comma
                 }
                 ':' => {
-                    tokens.push(Token::Colon);
                     self.advance();
+                    TokenKind::Colon
                 }
                 ';' => {
-                    tokens.push(Token::Semicolon);
                     self.advance();
+                    TokenKind::Semicolon
                 }
                 '.' => {
-                    tokens.push(Token::Dot);
                     self.advance();
+                    TokenKind::Dot
                 }
                 '=' => {
                     self.advance();
                     if self.peek() == Some(&'>') {
-                        tokens.push(Token::FatArrow);
                         self.advance();
+                        TokenKind::FatArrow
                     } else {
-                        tokens.push(Token::Equal);
+                        TokenKind::Equal
                     }
                 }
                 '-' => {
                     self.advance();
                     if self.peek() == Some(&'>') {
-                        tokens.push(Token::Arrow);
                         self.advance();
+                        TokenKind::Arrow
                     } else {
-                        tokens.push(Token::Minus);
+                        TokenKind::Minus
                     }
                 }
                 '+' => {
-                    tokens.push(Token::Plus);
                     self.advance();
+                    TokenKind::Plus
                 }
                 '*' => {
-                    tokens.push(Token::Star);
                     self.advance();
+                    TokenKind::Star
                 }
                 '/' => {
-                    tokens.push(Token::Slash);
                     self.advance();
+                    TokenKind::Slash
                 }
                 '%' => {
-                    tokens.push(Token::Percent);
                     self.advance();
+                    TokenKind::Percent
                 }
                 '&' => {
-                    tokens.push(Token::BitAnd);
                     self.advance();
+                    TokenKind::BitAnd
                 }
                 '|' => {
-                    tokens.push(Token::BitOr);
                     self.advance();
+                    TokenKind::BitOr
                 }
                 '^' => {
-                    tokens.push(Token::BitXor);
                     self.advance();
+                    TokenKind::BitXor
                 }
                 '<' => {
                     self.advance();
                     if self.peek() == Some(&'<') {
-                        tokens.push(Token::ShiftLeft);
                         self.advance();
+                        TokenKind::ShiftLeft
                     } else {
-                        tokens.push(Token::LessThan);
+                        TokenKind::LessThan
                     }
                 }
                 '>' => {
                     self.advance();
                     if self.peek() == Some(&'>') {
-                        tokens.push(Token::ShiftRight);
                         self.advance();
+                        TokenKind::ShiftRight
                     } else {
-                        tokens.push(Token::GreaterThan);
+                        TokenKind::GreaterThan
                     }
                 }
                 '!' => {
-                    tokens.push(Token::Not);
                     self.advance();
+                    TokenKind::Not
                 }
-                '0'..='9' => tokens.push(self.number()),
-                '"' => tokens.push(self.string()),
-                '\'' => tokens.push(self.char_literal()),
-                c if c.is_alphabetic() => tokens.push(self.identifier_or_keyword()),
+                '0'..='9' => self.tokenize_number()?,
+                '"' => self.tokenize_string()?,
+                '\'' => self.tokenize_char()?,
+                c if c.is_alphabetic() => self.tokenize_identifier_or_keyword()?,
                 c if c.is_whitespace() => {
                     self.advance();
+                    continue;
                 }
-                _ => panic!("Unexpected character: {}", c),
-            }
+                _ => return Err(self.error(format!("Unexpected character: {}", c))),
+            };
+
+            let lexeme = self.source[start_column-1..self.column-1].to_string();
+            tokens.push(Token::new(token_kind, self.line, start_column, lexeme));
         }
 
-        tokens
+        Ok(tokens)
     }
 
-    fn number(&mut self) -> Token {
+    fn error(&self, message: String) -> CompilerError {
+        let line_content = self.source.lines().nth(self.line - 1).unwrap_or("").to_string();
+        CompilerError::new(message, self.line, self.column, line_content, ErrorType::Lexical)
+    }
+
+    // Helper methods for tokenizing specific types
+    fn tokenize_number(&mut self) -> Result<TokenKind, CompilerError> {
         let mut num_str = String::new();
         while let Some(&c) = self.peek() {
             if c.is_digit(10) || c == '.' {
@@ -160,37 +187,15 @@ impl<'a> Lexer<'a> {
         }
 
         if num_str.contains('.') {
-            Token::FloatLiteral(num_str.parse().unwrap())
+            Ok(TokenKind::FloatLiteral(num_str.parse().map_err(|_| 
+                self.error("Invalid float literal".to_string()))?))
         } else {
-            Token::IntLiteral(num_str.parse().unwrap())
+            Ok(TokenKind::IntLiteral(num_str.parse().map_err(|_| 
+                self.error("Invalid integer literal".to_string()))?))
         }
     }
 
-    fn string(&mut self) -> Token {
-        self.advance(); // Skip the opening quote
-        let mut string_content = String::new();
-        while let Some(&c) = self.peek() {
-            if c == '"' {
-                self.advance(); // Skip the closing quote
-                break;
-            }
-            string_content.push(c);
-            self.advance();
-        }
-        Token::StringLiteral(string_content)
-    }
-
-    fn char_literal(&mut self) -> Token {
-        self.advance(); // Skip the opening quote
-        let c = self.advance().expect("Expected a character");
-        if self.advance() == Some('\'') {
-            Token::CharLiteral(c)
-        } else {
-            panic!("Expected closing quote for char literal");
-        }
-    }
-
-    fn identifier_or_keyword(&mut self) -> Token {
+    fn tokenize_identifier_or_keyword(&mut self) -> Result<TokenKind, CompilerError> {
         let mut ident = String::new();
         while let Some(&c) = self.peek() {
             if c.is_alphanumeric() || c == '_' {
@@ -201,21 +206,48 @@ impl<'a> Lexer<'a> {
             }
         }
 
-        match ident.as_str() {
-            "fn" => Token::Fn,
-            "let" => Token::Let,
-            "if" => Token::If,
-            "else" => Token::Else,
-            "match" => Token::Match,
-            "loop" => Token::Loop,
-            "return" => Token::Return,
-            "struct" => Token::Struct,
-            "None" => Token::None,
-            "Some" => Token::Some,
-            "Option" => Token::Option,
-            "Mut" => Token::Mut,
-            _ => Token::Identifier(ident),
+        Ok(match ident.as_str() {
+            "fn" => TokenKind::Fn,
+            "let" => TokenKind::Let,
+            "if" => TokenKind::If,
+            "else" => TokenKind::Else,
+            "match" => TokenKind::Match,
+            "loop" => TokenKind::Loop,
+            "return" => TokenKind::Return,
+            "struct" => TokenKind::Struct,
+            "None" => TokenKind::None,
+            "Some" => TokenKind::Some,
+            "Option" => TokenKind::Option,
+            "Mut" => TokenKind::Mut,
+            "true" => TokenKind::BoolLiteral(true),
+            "false" => TokenKind::BoolLiteral(false),
+            _ => TokenKind::Identifier(ident),
+        })
+    }
+
+    fn tokenize_string(&mut self) -> Result<TokenKind, CompilerError> {
+        self.advance(); // Skip opening quote
+        let mut string_content = String::new();
+        
+        while let Some(&c) = self.peek() {
+            if c == '"' {
+                self.advance(); // Skip closing quote
+                return Ok(TokenKind::StringLiteral(string_content));
+            }
+            string_content.push(c);
+            self.advance();
         }
+        
+        Err(self.error("Unterminated string literal".to_string()))
+    }
+
+    fn tokenize_char(&mut self) -> Result<TokenKind, CompilerError> {
+        self.advance(); // Skip opening quote
+        let c = self.advance().ok_or_else(|| self.error("Expected character".to_string()))?;
+        if self.advance() != Some('\'') {
+            return Err(self.error("Expected closing quote for char literal".to_string()));
+        }
+        Ok(TokenKind::CharLiteral(c))
     }
 }
 
@@ -234,25 +266,25 @@ mod tests {
         "#;
 
         let mut lexer = Lexer::new(input);
-        let tokens = lexer.tokenize();
+        let tokens = lexer.tokenize().unwrap();
 
         let expected_tokens = vec![
-            Token::Identifier("User".to_string()),
-            Token::Equal,
-            Token::OpenBrace,
-            Token::Identifier("name".to_string()),
-            Token::Colon,
-            Token::Identifier("Some".to_string()),
-            Token::LessThan,
-            Token::Identifier("String".to_string()),
-            Token::GreaterThan,
-            Token::Comma,
-            Token::Identifier("age".to_string()),
-            Token::Colon,
-            Token::Identifier("Int".to_string()),
-            Token::Equal,
-            Token::IntLiteral(0),
-            Token::CloseBrace,
+            Token::new(TokenKind::Identifier("User".to_string()), 1, 1, "User".to_string()),
+            Token::new(TokenKind::Equal, 1, 5, "=".to_string()),
+            Token::new(TokenKind::OpenBrace, 1, 7, "{".to_string()),
+            Token::new(TokenKind::Identifier("name".to_string()), 1, 9, "name".to_string()),
+            Token::new(TokenKind::Colon, 1, 13, ":".to_string()),
+            Token::new(TokenKind::Identifier("Some".to_string()), 1, 15, "Some".to_string()),
+            Token::new(TokenKind::LessThan, 1, 19, "<".to_string()),
+            Token::new(TokenKind::Identifier("String".to_string()), 1, 20, "String".to_string()),
+            Token::new(TokenKind::GreaterThan, 1, 25, ">".to_string()),
+            Token::new(TokenKind::Comma, 1, 27, ",".to_string()),
+            Token::new(TokenKind::Identifier("age".to_string()), 1, 29, "age".to_string()),
+            Token::new(TokenKind::Colon, 1, 33, ":".to_string()),
+            Token::new(TokenKind::Identifier("Int".to_string()), 1, 35, "Int".to_string()),
+            Token::new(TokenKind::Equal, 1, 38, "=".to_string()),
+            Token::new(TokenKind::IntLiteral(0), 1, 40, "0".to_string()),
+            Token::new(TokenKind::CloseBrace, 1, 42, "}".to_string()),
         ];
 
         assert_eq!(tokens, expected_tokens);
@@ -262,22 +294,22 @@ mod tests {
     fn test_operators() {
         let input = "+ - * / % & | ^ < > << >> !";
         let mut lexer = Lexer::new(input);
-        let tokens = lexer.tokenize();
+        let tokens = lexer.tokenize().unwrap();
 
         let expected_tokens = vec![
-            Token::Plus,
-            Token::Minus,
-            Token::Star,
-            Token::Slash,
-            Token::Percent,
-            Token::BitAnd,
-            Token::BitOr,
-            Token::BitXor,
-            Token::LessThan,
-            Token::GreaterThan,
-            Token::ShiftLeft,
-            Token::ShiftRight,
-            Token::Not,
+            Token::new(TokenKind::Plus, 1, 1, "+".to_string()),
+            Token::new(TokenKind::Minus, 1, 3, "-".to_string()),
+            Token::new(TokenKind::Star, 1, 5, "*".to_string()),
+            Token::new(TokenKind::Slash, 1, 7, "/".to_string()),
+            Token::new(TokenKind::Percent, 1, 9, "%".to_string()),
+            Token::new(TokenKind::BitAnd, 1, 11, "&".to_string()),
+            Token::new(TokenKind::BitOr, 1, 13, "|".to_string()),
+            Token::new(TokenKind::BitXor, 1, 15, "^".to_string()),
+            Token::new(TokenKind::LessThan, 1, 17, "<".to_string()),
+            Token::new(TokenKind::GreaterThan, 1, 19, ">".to_string()),
+            Token::new(TokenKind::ShiftLeft, 1, 21, "<<".to_string()),
+            Token::new(TokenKind::ShiftRight, 1, 23, ">>".to_string()),
+            Token::new(TokenKind::Not, 1, 25, "!".to_string()),
         ];
 
         assert_eq!(tokens, expected_tokens);
@@ -301,58 +333,58 @@ mod tests {
         "#;
 
         let mut lexer = Lexer::new(input);
-        let tokens = lexer.tokenize();
+        let tokens = lexer.tokenize().unwrap();
 
         let expected_tokens = vec![
-            Token::Identifier("User".to_string()),
-            Token::OpenParen,
-            Token::Identifier("name".to_string()),
-            Token::Colon,
-            Token::Identifier("Some".to_string()),
-            Token::LessThan,
-            Token::Identifier("String".to_string()),
-            Token::GreaterThan,
-            Token::CloseParen,
-            Token::Identifier("User".to_string()),
-            Token::OpenBrace,
-            Token::Match,  // Updated to use Token::Match
-            Token::OpenParen,
-            Token::Identifier("name".to_string()),
-            Token::CloseParen,
-            Token::OpenBrace,
-            Token::Identifier("Some".to_string()),
-            Token::OpenParen,
-            Token::Identifier("name".to_string()),
-            Token::CloseParen,
-            Token::Arrow,
-            Token::OpenBrace,
-            Token::Identifier("name".to_string()),
-            Token::Equal,
-            Token::Identifier("some".to_string()),
-            Token::OpenParen,
-            Token::Identifier("name".to_string()),
-            Token::CloseParen,
-            Token::Comma,
-            Token::Identifier("age".to_string()),
-            Token::Equal,
-            Token::IntLiteral(0),
-            Token::CloseBrace,
-            Token::Comma,
-            Token::Identifier("None".to_string()),
-            Token::Arrow,
-            Token::OpenBrace,
-            Token::Identifier("name".to_string()),
-            Token::Equal,
-            Token::Identifier("none".to_string()),
-            Token::OpenParen,
-            Token::CloseParen,
-            Token::Comma,
-            Token::Identifier("age".to_string()),
-            Token::Equal,
-            Token::IntLiteral(0),
-            Token::CloseBrace,
-            Token::CloseBrace,
-            Token::CloseBrace,
+            Token::new(TokenKind::Identifier("User".to_string()), 1, 1, "User".to_string()),
+            Token::new(TokenKind::OpenParen, 1, 5, "(".to_string()),
+            Token::new(TokenKind::Identifier("name".to_string()), 1, 6, "name".to_string()),
+            Token::new(TokenKind::Colon, 1, 10, ":".to_string()),
+            Token::new(TokenKind::Identifier("Some".to_string()), 1, 12, "Some".to_string()),
+            Token::new(TokenKind::LessThan, 1, 16, "<".to_string()),
+            Token::new(TokenKind::Identifier("String".to_string()), 1, 17, "String".to_string()),
+            Token::new(TokenKind::GreaterThan, 1, 22, ">".to_string()),
+            Token::new(TokenKind::CloseParen, 1, 24, ")".to_string()),
+            Token::new(TokenKind::Identifier("User".to_string()), 1, 26, "User".to_string()),
+            Token::new(TokenKind::OpenBrace, 1, 28, "{".to_string()),
+            Token::new(TokenKind::Match, 1, 30, "match".to_string()),
+            Token::new(TokenKind::OpenParen, 1, 35, "(".to_string()),
+            Token::new(TokenKind::Identifier("name".to_string()), 1, 36, "name".to_string()),
+            Token::new(TokenKind::CloseParen, 1, 40, ")".to_string()),
+            Token::new(TokenKind::OpenBrace, 1, 42, "{".to_string()),
+            Token::new(TokenKind::Identifier("Some".to_string()), 1, 44, "Some".to_string()),
+            Token::new(TokenKind::OpenParen, 1, 48, "(".to_string()),
+            Token::new(TokenKind::Identifier("name".to_string()), 1, 49, "name".to_string()),
+            Token::new(TokenKind::CloseParen, 1, 53, ")".to_string()),
+            Token::new(TokenKind::Arrow, 1, 55, "->".to_string()),
+            Token::new(TokenKind::OpenBrace, 1, 57, "{".to_string()),
+            Token::new(TokenKind::Identifier("name".to_string()), 1, 59, "name".to_string()),
+            Token::new(TokenKind::Equal, 1, 63, "=".to_string()),
+            Token::new(TokenKind::Identifier("some".to_string()), 1, 65, "some".to_string()),
+            Token::new(TokenKind::OpenParen, 1, 69, "(".to_string()),
+            Token::new(TokenKind::Identifier("name".to_string()), 1, 70, "name".to_string()),
+            Token::new(TokenKind::CloseParen, 1, 74, ")".to_string()),
+            Token::new(TokenKind::Comma, 1, 76, ",".to_string()),
+            Token::new(TokenKind::Identifier("age".to_string()), 1, 78, "age".to_string()),
+            Token::new(TokenKind::Equal, 1, 82, "=".to_string()),
+            Token::new(TokenKind::IntLiteral(0), 1, 84, "0".to_string()),
+            Token::new(TokenKind::CloseBrace, 1, 86, "}".to_string()),
+            Token::new(TokenKind::Comma, 1, 88, ",".to_string()),
+            Token::new(TokenKind::Identifier("None".to_string()), 1, 90, "None".to_string()),
+            Token::new(TokenKind::Arrow, 1, 92, "->".to_string()),
+            Token::new(TokenKind::OpenBrace, 1, 94, "{".to_string()),
+            Token::new(TokenKind::Identifier("name".to_string()), 1, 96, "name".to_string()),
+            Token::new(TokenKind::Equal, 1, 100, "=".to_string()),
+            Token::new(TokenKind::Identifier("none".to_string()), 1, 102, "none".to_string()),
+            Token::new(TokenKind::OpenParen, 1, 106, "(".to_string()),
+            Token::new(TokenKind::CloseParen, 1, 107, ")".to_string()),
+            Token::new(TokenKind::Comma, 1, 109, ",".to_string()),
+            Token::new(TokenKind::Identifier("age".to_string()), 1, 111, "age".to_string()),
+            Token::new(TokenKind::Equal, 1, 115, "=".to_string()),
+            Token::new(TokenKind::IntLiteral(0), 1, 117, "0".to_string()),
+            Token::new(TokenKind::CloseBrace, 1, 119, "}".to_string()),
+            Token::new(TokenKind::CloseBrace, 1, 121, "}".to_string()),
+            Token::new(TokenKind::CloseBrace, 1, 123, "}".to_string()),
         ];
 
         assert_eq!(tokens, expected_tokens);

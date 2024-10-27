@@ -8,10 +8,66 @@ pub struct Token {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
+    // Keywords
     Fn,
     Let,
+    If,
+    Else,
+    Match,
+    Loop,
     Return,
-    Identifier(String),
+    Struct,
+    None,
+    Some,
+    Option,
+    Mut,
+
+    // Literals
     IntLiteral(i32),
-    // ... rest of your token types ...
+    FloatLiteral(f64),
+    StringLiteral(String),
+    CharLiteral(char),
+    BoolLiteral(bool),
+    Identifier(String),
+
+    // Operators
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    Percent,
+    Equal,
+    Arrow,      // ->
+    FatArrow,   // =>
+    BitAnd,
+    BitOr,
+    BitXor,
+    Not,
+    ShiftLeft,  // <<
+    ShiftRight, // >>
+    LessThan,
+    GreaterThan,
+
+    // Delimiters
+    OpenParen,    // (
+    CloseParen,   // )
+    OpenBrace,    // {
+    CloseBrace,   // }
+    OpenBracket,  // [
+    CloseBracket, // ]
+    Comma,
+    Colon,
+    Semicolon,
+    Dot,
+}
+
+impl Token {
+    pub fn new(kind: TokenKind, line: usize, column: usize, lexeme: String) -> Self {
+        Token {
+            kind,
+            line,
+            column,
+            lexeme,
+        }
+    }
 }

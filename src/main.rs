@@ -6,6 +6,7 @@ mod cl_codegen;
 mod lexer;
 mod token;
 mod parser;
+mod error;
 
 use ast_validator::AstValidator;
 use cl_codegen::CodeGenerator;
@@ -13,6 +14,7 @@ use lexer::Lexer;
 use parser::Parser;
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::Module;
+use error::{CompilerError, ErrorType};
 
 fn main() {
     // Sample source code in your language
@@ -31,13 +33,23 @@ fn main() {
 
     // Step 1: Lexing
     let mut lexer = Lexer::new(source_code);
-    let tokens = lexer.tokenize();
-    println!("Tokens: {:?}", tokens);
+    let tokens = match lexer.tokenize() {
+        Ok(tokens) => tokens,
+        Err(e) => {
+            eprintln!("{}", e.display());
+            return;
+        }
+    };
 
     // Step 2: Parsing
-    let mut parser = Parser::new(tokens);
-    let program = parser.parse();
-    println!("AST: {:?}", program);
+    let mut parser = Parser::new(tokens, source_code.to_string());
+    let program = match parser.parse() {
+        Ok(program) => program,
+        Err(e) => {
+            eprintln!("{}", e.display());
+            return;
+        }
+    };
 
     // Step 3: Validation
     let mut validator = AstValidator::new();
