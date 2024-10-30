@@ -19,18 +19,29 @@ use cranelift_codegen::settings;
 fn main() {
     // Sample source code demonstrating key language features
     let source_code = r#"
-        // Struct definition
-        struct Point {
+        // Define a Point struct
+        Point {
             x: int,
             y: int
+        };
+
+        // Function to calculate distance from origin
+        fn distance(p: Point) -> int {
+            let x_squared: int = p.x * p.x;
+            let y_squared: int = p.y * p.y;
+            return x_squared + y_squared;
         }
 
         // Main function
         fn main() -> int {
-            let p = Point { x: 1, y: 2 };
-            p.x = 3;
-            p.y = 4;
-            return p.x + p.y;
+            // Create a point
+            let point: Point = Point { 
+                x: 3,
+                y: 4 
+            };
+
+            // Calculate and return distance
+            return distance(point);
         }
     "#;
 
@@ -39,7 +50,7 @@ fn main() {
     let tokens = match lexer.tokenize() {
         Ok(tokens) => {
             println!("Lexical analysis successful!");
-            // println!("Tokens: {:?}", tokens);
+            println!("Tokens: {:?}", tokens);
             tokens
         }
         Err(e) => {
@@ -64,31 +75,37 @@ fn main() {
 
     // Step 3: Semantic Analysis
     let mut validator = AstValidator::new();
-    if let Err(error) = validator.validate_program(&program) {
-        eprintln!("Validation error: {}", error);
-        return;
+    match validator.validate_program(&program) {
+        Ok(_) => println!("Semantic analysis successful!"),
+        Err(e) => {
+            eprintln!("Validation error: {}", e);
+            return;
+        }
     }
-    println!("Semantic analysis successful!");
 
     // Step 4: Code Generation
-    let isa = cranelift_native::builder()
+    let isa = match cranelift_native::builder()
         .unwrap()
-        .finish(settings::Flags::new(settings::builder()))
-        .unwrap();
+        .finish(settings::Flags::new(settings::builder())) {
+            Ok(isa) => isa,
+            Err(e) => {
+                eprintln!("Failed to create ISA: {}", e);
+                return;
+            }
+    };
 
-    let jit_builder =  JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
-
-    
+    let jit_builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
     let mut jit_module = JITModule::new(jit_builder);
     let mut codegen = CodeGenerator::new(&mut jit_module);
     
     match codegen.compile_program(&program) {
-        Ok(_) => println!("Code generation successful!"),
+        Ok(_) => {
+            println!("Code generation successful!");
+            println!("Compilation completed successfully!");
+        },
         Err(e) => {
             eprintln!("Code generation error: {}", e);
             return;
         }
     }
-
-    println!("Compilation completed successfully!");
 }

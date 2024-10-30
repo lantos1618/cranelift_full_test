@@ -48,7 +48,11 @@ impl CompilerError {
             self.column
         ));
         error_display.push_str(&format!("{}\n", self.source_line));
-        error_display.push_str(&format!("{}^\n", " ".repeat(self.column - 1)));
+        
+        // Ensure column is at least 1 and doesn't exceed the line length
+        let pointer_pos = self.column.saturating_sub(1).min(self.source_line.len());
+        error_display.push_str(&format!("{}^\n", " ".repeat(pointer_pos)));
+        
         error_display
     }
 }

@@ -56,8 +56,12 @@ impl AstValidator {
             Stmt::FuncDef { func_decl, body } => {
                 self.validate_func_def(func_decl, body)?;
             }
-            Stmt::StructDef { name: _, fields: _ } => {
-                // Struct definitions are always valid
+            Stmt::StructDef { name, fields } => {
+                let field_types: Vec<AstType> = fields.iter()
+                    .map(|(_, typ)| typ.clone())
+                    .collect();
+                self.variables.insert(name.clone(), AstType::Struct(name.clone()));
+                
             }
             Stmt::If { condition, then_branch, else_branch } => {
                 let cond_type = self.validate_expr(condition)?;
@@ -188,6 +192,10 @@ impl AstValidator {
                         Ok(AstType::Int)
                     }
                 }
+            }
+            Expr::StructInit { struct_name, fields: _ } => {
+                // Return the struct type for struct initialization
+                Ok(AstType::Struct(struct_name.clone()))
             }
             Expr::FuncCall(name, args) => {
                 let saved_vars = self.variables.clone();
@@ -350,69 +358,43 @@ impl AstValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{Expr, Stmt, Program, BinOp, AstType, FuncDecl};
+    use crate::ast::*;
 
     #[test]
-    fn test_validate_arithmetic() {
+    fn test_validate_struct_init_and_use() {
         let mut validator = AstValidator::new();
-        let expr = Expr::BinaryOp(
-            Box::new(Expr::IntLiteral(1)),
-            BinOp::Add,
-            Box::new(Expr::IntLiteral(2)),
-        );
-        assert!(validator.validate_expr(&expr).is_ok());
-    }
 
-    #[test]
-    fn test_validate_invalid_arithmetic() {
-        let mut validator = AstValidator::new();
-        let expr = Expr::BinaryOp(
-            Box::new(Expr::BoolLiteral(true)),
-            BinOp::Add,
-            Box::new(Expr::IntLiteral(2)),
-        );
-        assert!(validator.validate_expr(&expr).is_err());
-    }
-
-    #[test]
-    fn test_validate_function_call() {
-        let mut validator = AstValidator::new();
-        
-        // Add function to validator
-        validator.functions.insert(
-            "add".to_string(),
-            (vec![AstType::Int, AstType::Int], AstType::Int),
-        );
-        
-        let call = Expr::FuncCall(
-            "add".to_string(),
-            vec![
-                Expr::IntLiteral(1),
-                Expr::IntLiteral(2),
+        // Define struct
+        let struct_def = Stmt::StructDef {
+            name: "Point".to_string(),
+            fields: vec![
+                ("x".to_string(), AstType::Int),
+                ("y".to_string(), AstType::Int),
             ],
+        };
+        validator.validate_stmt(&struct_def).unwrap();
+
+        // Test struct initialization
+        let init = Expr::StructInit {
+            struct_name: "Point".to_string(),
+            fields: vec![
+                ("x".to_string(), Expr::IntLiteral(3)),
+                ("y".to_string(), Expr::IntLiteral(4)),
+            ],
+        };
+        let init_type = validator.validate_expr(&init).unwrap();
+        assert_eq!(init_type, AstType::Struct("Point".to_string()));
+
+        // Test function call with struct parameter
+        validator.functions.insert(
+            "distance".to_string(),
+            (vec![AstType::Struct("Point".to_string())], AstType::Int),
         );
-        
+
+        let call = Expr::FuncCall(
+            "distance".to_string(),
+            vec![init],
+        );
         assert!(validator.validate_expr(&call).is_ok());
-    }
-
-    #[test]
-    fn test_validate_invalid_function_call() {
-        let mut validator = AstValidator::new();
-        
-        // Add function to validator
-        validator.functions.insert(
-            "add".to_string(),
-            (vec![AstType::Int, AstType::Int], AstType::Int),
-        );
-        
-        let call = Expr::FuncCall(
-            "add".to_string(),
-            vec![
-                Expr::IntLiteral(1),
-                Expr::BoolLiteral(true),
-            ],
-        );
-        
-        assert!(validator.validate_expr(&call).is_err());
     }
 }

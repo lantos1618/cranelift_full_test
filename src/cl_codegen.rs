@@ -218,7 +218,7 @@ impl<'a> CodeGenerator<'a> {
 
         builder.declare_var(var, cl_type);
         variables.insert(name.to_string(), var);
-        self.variable_types.insert(name.to_string(), var_type.clone()); // Use name instead of Variable
+        self.variable_types.insert(name.to_string(), var_type.clone());
 
         if let Some(expr) = init_expr {
             let value = self.compile_expr(expr, Some(builder), variables)?;
@@ -681,21 +681,15 @@ impl<'a> CodeGenerator<'a> {
         }
     }
 
-    fn get_struct_field_offset(&self, struct_name: &str, field_name: &str) -> Result<usize, CompilerError> {
-        if let Some(struct_def) = self.struct_layouts.get(struct_name) {
-            if let Some(&offset) = struct_def.field_offsets.get(field_name) {
+    fn get_struct_field_offset(&self, struct_name: &str, field_name: &str) -> Result<usize> {
+        if let Some(layout) = self.struct_layouts.get(struct_name) {
+            if let Some(&offset) = layout.field_offsets.get(field_name) {
                 Ok(offset)
             } else {
-                Err(CompilerError::new(
-                    format!("Field {} not found in struct {}", field_name, struct_name),
-                    0, 0, "".to_string(), ErrorType::Semantic,
-                ))
+                Err(anyhow::anyhow!("Field {} not found in struct {}", field_name, struct_name))
             }
         } else {
-            Err(CompilerError::new(
-                format!("Struct {} not found", struct_name),
-                0, 0, "".to_string(), ErrorType::Semantic,
-            ))
+            Err(anyhow::anyhow!("Struct {} not found", struct_name))
         }
     }
 
@@ -943,7 +937,7 @@ mod tests {
                     BinOp::Add,
                     Box::new(Expr::IntLiteral(20)),
                 ))),
-            ]);
+                ]);
 
             codegen.compile_program(&prog).expect("Compilation failed");
 

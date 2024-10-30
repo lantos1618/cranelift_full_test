@@ -33,46 +33,28 @@ impl Parser {
             Some(TokenKind::Return) => {
                 self.tokens.next(); // consume Return token
                 let expr = self.parse_expression()?;
-                // Expect semicolon after return statement
                 self.expect_token(&TokenKind::Semicolon)?;
                 Ok(Stmt::Return(Box::new(expr)))
             }
             Some(TokenKind::Let) => {
-                self.tokens.next(); // consume Let token
-                let name = if let Some(Token { kind: TokenKind::Identifier(name), .. }) = self.tokens.next() {
-                    name
-                } else {
-                    return Err(self.error("Expected identifier after let"));
-                };
-                self.expect_token(&TokenKind::Colon)?;
-                let type_name = self.parse_type()?;
-                self.expect_token(&TokenKind::Equal)?;
-                let expr = self.parse_expression()?;
-                self.expect_token(&TokenKind::Semicolon)?;
-                Ok(Stmt::VarAssign {
-                    name,
-                    expr: Box::new(expr),
-                })
+                self.parse_let_statement()
             }
-            Some(TokenKind::Identifier(_)) => {
+            Some(TokenKind::Identifier(name)) => {
+                let name = name.clone();
+                // Check if this is a struct definition
                 if self.is_struct_definition() {
-                    Ok(self.parse_struct_definition()?)
-                } else if self.is_assignment() {
-                    Ok(self.parse_assignment()?)
+                    self.parse_struct_definition(name)
                 } else {
-                    let expr = self.parse_expression()?;
-                    self.expect_token(&TokenKind::Semicolon)?;
-                    Ok(Stmt::ExprStmt(Box::new(expr)))
+                    self.parse_expr_statement()
                 }
             }
             _ => {
-                let expr = self.parse_expression()?;
-                self.expect_token(&TokenKind::Semicolon)?;
-                Ok(Stmt::ExprStmt(Box::new(expr)))
+                self.parse_expr_statement()
             }
         }
     }
 
+    #[allow(dead_code)]
     fn is_assignment(&mut self) -> bool {
         if let Some(Token { kind: TokenKind::Identifier(_), .. }) = self.tokens.peek() {
             let mut iter = self.tokens.clone();
@@ -84,6 +66,7 @@ impl Parser {
         false
     }
 
+    #[allow(dead_code)]
     fn parse_assignment(&mut self) -> Result<Stmt, CompilerError> {
         if let Some(Token { kind: TokenKind::Identifier(name), .. }) = self.tokens.next() {
             self.tokens.next(); // Skip '='
@@ -304,63 +287,39 @@ impl Parser {
         Err(self.error("Unclosed block"))
     }
 
-    fn parse_struct_definition(&mut self) -> Result<Stmt, CompilerError> {
-        // Get struct name
-        let name = if let Some(Token { kind: TokenKind::Identifier(name), .. }) = self.tokens.next() {
-            name
-        } else {
-            Err(self.error("Expected struct name"))?
-        };
-
-        // Expect =
-        if let Some(Token { kind: TokenKind::Equal, .. }) = self.tokens.next() {
-        } else {
-            Err(self.error("Expected = after struct name"))?
-        }
-
-        // Expect {
-        if let Some(Token { kind: TokenKind::OpenBrace, .. }) = self.tokens.next() {
-        } else {
-            Err(self.error("Expected {{{{ after ="))?; // Double {{ to escape
-        }
-
+    fn parse_struct_definition(&mut self, name: String) -> Result<Stmt, CompilerError> {
+        self.tokens.next(); // consume struct name
+        self.expect_token(&TokenKind::OpenBrace)?;
+        
         let mut fields = Vec::new();
         
-        // Parse fields until we hit }
         while let Some(token) = self.tokens.peek() {
-            if token.kind == TokenKind::CloseBrace {  // Compare TokenKind instead of dereferencing
-                self.tokens.next();
-                break;
+            if token.kind == TokenKind::CloseBrace {
+                self.tokens.next(); // consume }
+                self.expect_token(&TokenKind::Semicolon)?;
+                return Ok(Stmt::StructDef {
+                    name,
+                    fields,
+                });
             }
-
-            // Parse field name
-            let field_name = if let Some(Token { kind: TokenKind::Identifier(name), .. }) = self.tokens.next() {
-                name
-            } else {
-                Err(self.error("Expected field name"))?
+            
+            // Parse field
+            let field_name = match self.tokens.next() {
+                Some(Token { kind: TokenKind::Identifier(name), .. }) => name,
+                _ => return Err(self.error("Expected field name")),
             };
-
-            // Expect :
-            if let Some(Token { kind: TokenKind::Colon, .. }) = self.tokens.next() {
-            } else {
-                Err(self.error("Expected : after field name"))?
-            }
-
-            // Parse type
+            
+            self.expect_token(&TokenKind::Colon)?;
             let field_type = self.parse_type()?;
-
             fields.push((field_name, field_type));
-
-            // Handle optional comma
+            
+            // Handle comma
             if let Some(Token { kind: TokenKind::Comma, .. }) = self.tokens.peek() {
                 self.tokens.next();
             }
         }
-
-        Ok(Stmt::StructDef {
-            name,
-            fields,
-        })
+        
+        Err(self.error("Unclosed struct definition"))
     }
 
     fn parse_type(&mut self) -> Result<AstType, CompilerError> {
@@ -380,14 +339,8 @@ impl Parser {
 
     fn is_struct_definition(&mut self) -> bool {
         let mut iter = self.tokens.clone();
-        if let Some(Token { kind: TokenKind::Identifier(_), .. }) = iter.next() {
-            if let Some(Token { kind: TokenKind::Equal, .. }) = iter.next() {
-                if let Some(Token { kind: TokenKind::OpenBrace, .. }) = iter.next() {
-                    return true;
-                }
-            }
-        }
-        false
+        iter.next(); // Skip identifier
+        matches!(iter.next(), Some(Token { kind: TokenKind::OpenBrace, .. }))
     }
 
     fn expect_token(&mut self, expected: &TokenKind) -> Result<Token, CompilerError> {
@@ -438,6 +391,29 @@ impl Parser {
 
     fn current_column(&mut self) -> usize {
         self.tokens.peek().map(|t| t.column).unwrap_or(1)
+    }
+
+    fn parse_expr_statement(&mut self) -> Result<Stmt, CompilerError> {
+        let expr = self.parse_expression()?;
+        self.expect_token(&TokenKind::Semicolon)?;
+        Ok(Stmt::ExprStmt(Box::new(expr)))
+    }
+
+    fn parse_let_statement(&mut self) -> Result<Stmt, CompilerError> {
+        self.tokens.next(); // consume Let token
+        let name = match self.tokens.next() {
+            Some(Token { kind: TokenKind::Identifier(name), .. }) => name,
+            _ => return Err(self.error("Expected identifier after let")),
+        };
+        self.expect_token(&TokenKind::Colon)?;
+        let _type_name = self.parse_type()?;
+        self.expect_token(&TokenKind::Equal)?;
+        let expr = self.parse_expression()?;
+        self.expect_token(&TokenKind::Semicolon)?;
+        Ok(Stmt::VarAssign {
+            name,
+            expr: Box::new(expr),
+        })
     }
 }
 
@@ -589,33 +565,30 @@ mod tests {
     fn test_parse_struct_definition() {
         let tokens = vec![
             Token::new(TokenKind::Identifier("Point".to_string()), 1, 1, "Point".to_string()),
-            Token::new(TokenKind::Equal, 1, 2, "=".to_string()),
-            Token::new(TokenKind::OpenBrace, 1, 3, "{".to_string()),
-            Token::new(TokenKind::Identifier("x".to_string()), 1, 4, "x".to_string()),
-            Token::new(TokenKind::Colon, 1, 5, ":".to_string()),
-            Token::new(TokenKind::Identifier("int".to_string()), 1, 6, "int".to_string()),
-            Token::new(TokenKind::Comma, 1, 7, ",".to_string()),
-            Token::new(TokenKind::Identifier("y".to_string()), 1, 8, "y".to_string()),
-            Token::new(TokenKind::Colon, 1, 9, ":".to_string()),
-            Token::new(TokenKind::Identifier("int".to_string()), 1, 10, "int".to_string()),
-            Token::new(TokenKind::CloseBrace, 1, 11, "}".to_string()),
+            Token::new(TokenKind::OpenBrace, 1, 7, "{".to_string()),
+            Token::new(TokenKind::Identifier("x".to_string()), 2, 5, "x".to_string()),
+            Token::new(TokenKind::Colon, 2, 6, ":".to_string()),
+            Token::new(TokenKind::Identifier("int".to_string()), 2, 8, "int".to_string()),
+            Token::new(TokenKind::Comma, 2, 11, ",".to_string()),
+            Token::new(TokenKind::Identifier("y".to_string()), 3, 5, "y".to_string()),
+            Token::new(TokenKind::Colon, 3, 6, ":".to_string()),
+            Token::new(TokenKind::Identifier("int".to_string()), 3, 8, "int".to_string()),
+            Token::new(TokenKind::CloseBrace, 4, 1, "}".to_string()),
+            Token::new(TokenKind::Semicolon, 4, 2, ";".to_string()),
         ];
 
-        let mut parser = Parser::new(tokens, "".to_string());
-        let result = parser.parse_struct_definition();
+        let mut parser = Parser::new(tokens, "test source".to_string());
+        let result = parser.parse_struct_definition("Point".to_string()).unwrap();
 
-        // Assert that the result is Ok and compare the unwrapped value
-        assert!(result.is_ok());
-        assert_eq!(
-            result.unwrap(),
-            Stmt::StructDef {
-                name: "Point".to_string(),
-                fields: vec![
-                    ("x".to_string(), AstType::Int),
-                    ("y".to_string(), AstType::Int),
-                ],
-            }
-        );
+        let expected = Stmt::StructDef {
+            name: "Point".to_string(),
+            fields: vec![
+                ("x".to_string(), AstType::Int),
+                ("y".to_string(), AstType::Int),
+            ],
+        };
+
+        assert_eq!(result, expected);
     }
 
     #[test]
@@ -691,7 +664,7 @@ mod tests {
         ];
 
         let mut parser = Parser::new(tokens, "".to_string());
-        let result = parser.parse_struct_definition().unwrap(); // Unwrap the Result
+        let result = parser.parse_struct_definition("User".to_string()).unwrap();
 
         let expected = Stmt::StructDef {
             name: "User".to_string(),
@@ -717,7 +690,7 @@ mod tests {
         ];
 
         let mut parser = Parser::new(tokens, "".to_string());
-        let result = parser.parse_struct_definition();
+        let result = parser.parse_struct_definition("Point".to_string());
         assert!(result.is_err());
         assert!(result.unwrap_err().message.contains("Expected : after field name"));
     }
@@ -830,5 +803,67 @@ mod tests {
         ]);
 
         assert_eq!(program, expected_ast);
+    }
+
+    #[test]
+    fn test_parse_struct_definition_and_expression() {
+        let tokens = vec![
+            // Struct definition
+            Token::new(TokenKind::Identifier("Point".to_string()), 1, 1, "Point".to_string()),
+            Token::new(TokenKind::OpenBrace, 1, 7, "{".to_string()),
+            Token::new(TokenKind::Identifier("x".to_string()), 2, 5, "x".to_string()),
+            Token::new(TokenKind::Colon, 2, 6, ":".to_string()),
+            Token::new(TokenKind::Identifier("int".to_string()), 2, 8, "int".to_string()),
+            Token::new(TokenKind::Comma, 2, 11, ",".to_string()),
+            Token::new(TokenKind::Identifier("y".to_string()), 3, 5, "y".to_string()),
+            Token::new(TokenKind::Colon, 3, 6, ":".to_string()),
+            Token::new(TokenKind::Identifier("int".to_string()), 3, 8, "int".to_string()),
+            Token::new(TokenKind::CloseBrace, 4, 1, "}".to_string()),
+            Token::new(TokenKind::Semicolon, 4, 2, ";".to_string()),
+            // Expression statement
+            Token::new(TokenKind::Identifier("Point".to_string()), 5, 1, "Point".to_string()),
+            Token::new(TokenKind::OpenBrace, 5, 7, "{".to_string()),
+            Token::new(TokenKind::Identifier("x".to_string()), 5, 8, "x".to_string()),
+            Token::new(TokenKind::Colon, 5, 9, ":".to_string()),
+            Token::new(TokenKind::IntLiteral(1), 5, 11, "1".to_string()),
+            Token::new(TokenKind::Comma, 5, 12, ",".to_string()),
+            Token::new(TokenKind::Identifier("y".to_string()), 5, 14, "y".to_string()),
+            Token::new(TokenKind::Colon, 5, 15, ":".to_string()),
+            Token::new(TokenKind::IntLiteral(2), 5, 17, "2".to_string()),
+            Token::new(TokenKind::CloseBrace, 5, 18, "}".to_string()),
+            Token::new(TokenKind::Semicolon, 5, 19, ";".to_string()),
+        ];
+
+        let mut parser = Parser::new(tokens, "test source".to_string());
+        let program = parser.parse().unwrap();
+
+        assert_eq!(program.statements.len(), 2);
+
+        // Check struct definition
+        match &program.statements[0] {
+            Stmt::StructDef { name, fields } => {
+                assert_eq!(name, "Point");
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].0, "x");
+                assert_eq!(fields[1].0, "y");
+            }
+            _ => panic!("Expected struct definition"),
+        }
+
+        // Check expression statement
+        match &program.statements[1] {
+            Stmt::ExprStmt(expr) => {
+                match &**expr {
+                    Expr::StructInit { struct_name, fields } => {
+                        assert_eq!(struct_name, "Point");
+                        assert_eq!(fields.len(), 2);
+                        assert_eq!(fields[0].0, "x");
+                        assert_eq!(fields[1].0, "y");
+                    }
+                    _ => panic!("Expected struct initialization expression"),
+                }
+            }
+            _ => panic!("Expected expression statement"),
+        }
     }
 }
