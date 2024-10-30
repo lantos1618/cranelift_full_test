@@ -43,14 +43,28 @@ impl<'a> Lexer<'a> {
     pub fn tokenize(&mut self) -> Result<Vec<Token>, CompilerError> {
         let mut tokens = Vec::new();
 
-        self.skip_whitespace();
-
         while let Some(&c) = self.peek() {
             let start_position = self.position;
             let start_column = self.column;
             let start_line = self.line;
 
             let token_kind = match c {
+                // Handle comments
+                '/' => {
+                    self.advance(); // consume first '/'
+                    if let Some(&'/') = self.peek() {
+                        // Line comment found, skip until newline
+                        self.skip_line_comment();
+                        continue;
+                    } else if let Some(&'*') = self.peek() {
+                        // Block comment found, skip until */
+                        self.skip_block_comment()?;
+                        continue;
+                    } else {
+                        // Just a division operator
+                        TokenKind::Slash
+                    }
+                }
                 '{' => {
                     self.advance();
                     TokenKind::OpenBrace
@@ -116,10 +130,6 @@ impl<'a> Lexer<'a> {
                 '*' => {
                     self.advance();
                     TokenKind::Star
-                }
-                '/' => {
-                    self.advance();
-                    TokenKind::Slash
                 }
                 '%' => {
                     self.advance();
@@ -271,6 +281,30 @@ impl<'a> Lexer<'a> {
         let line_content = self.source.lines().nth(self.line - 1).unwrap_or("").to_string();
         CompilerError::new(message, self.line, self.column, line_content, ErrorType::Lexical)
     }
+
+    fn skip_line_comment(&mut self) {
+        self.advance(); // consume the second '/'
+        while let Some(&c) = self.peek() {
+            if c == '\n' {
+                break;
+            }
+            self.advance();
+        }
+    }
+
+    fn skip_block_comment(&mut self) -> Result<(), CompilerError> {
+        self.advance(); // consume the '*'
+        while let Some(&c) = self.peek() {
+            self.advance();
+            if c == '*' {
+                if let Some(&'/') = self.peek() {
+                    self.advance(); // consume the '/'
+                    return Ok(());
+                }
+            }
+        }
+        Err(self.error("Unterminated block comment".to_string()))
+    }
 }
 
 #[cfg(test)]
@@ -332,6 +366,39 @@ mod tests {
             Token::new(TokenKind::Equal, 4, 26, "=".to_string()),
             Token::new(TokenKind::IntLiteral(0), 4, 28, "0".to_string()),
             Token::new(TokenKind::CloseBrace, 5, 13, "}".to_string()),
+        ];
+
+        assert_eq!(tokens, expected_tokens);
+    }
+
+    #[test]
+    fn test_comments() {
+        let input = r#"
+            // This is a line comment
+            let x: int = 42; // End of line comment
+            /* This is a
+               block comment */
+            let y: int = 10;
+        "#;
+
+        let mut lexer = Lexer::new(input);
+        let tokens = lexer.tokenize().unwrap();
+
+        let expected_tokens = vec![
+            Token::new(TokenKind::Let, 3, 13, "let".to_string()),
+            Token::new(TokenKind::Identifier("x".to_string()), 3, 17, "x".to_string()),
+            Token::new(TokenKind::Colon, 3, 18, ":".to_string()),
+            Token::new(TokenKind::Identifier("int".to_string()), 3, 20, "int".to_string()),
+            Token::new(TokenKind::Equal, 3, 24, "=".to_string()),
+            Token::new(TokenKind::IntLiteral(42), 3, 26, "42".to_string()),
+            Token::new(TokenKind::Semicolon, 3, 28, ";".to_string()),
+            Token::new(TokenKind::Let, 6, 13, "let".to_string()),
+            Token::new(TokenKind::Identifier("y".to_string()), 6, 17, "y".to_string()),
+            Token::new(TokenKind::Colon, 6, 18, ":".to_string()),
+            Token::new(TokenKind::Identifier("int".to_string()), 6, 20, "int".to_string()),
+            Token::new(TokenKind::Equal, 6, 24, "=".to_string()),
+            Token::new(TokenKind::IntLiteral(10), 6, 26, "10".to_string()),
+            Token::new(TokenKind::Semicolon, 6, 28, ";".to_string()),
         ];
 
         assert_eq!(tokens, expected_tokens);

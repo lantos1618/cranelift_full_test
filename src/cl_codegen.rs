@@ -3,12 +3,12 @@ use anyhow::Result;
 use cranelift::prelude::*;
 use cranelift_codegen::ir::immediates::Offset32;
 use cranelift_module::{FuncId, Linkage, Module};
-use cranelift_jit::{JITBuilder, JITModule};
+use cranelift_jit::JITModule;
 
 use crate::ast::*;
+use crate::error::{CompilerError, ErrorType};
 
 use std::collections::HashMap;
-use std::mem::transmute;
 
 
 // Define LoopContext struct
@@ -18,11 +18,16 @@ pub struct LoopContext {
     pub exit_block: Block,
 }
 
+pub struct StructLayout {
+    pub field_offsets: HashMap<String, usize>,
+}
 
 pub struct CodeGenerator<'a> {
     pub module: &'a mut JITModule,
+    #[allow(dead_code)]
     builder_context: FunctionBuilderContext,
     struct_types: HashMap<String, Vec<(String, AstType)>>, // Struct definitions
+    struct_layouts: HashMap<String, StructLayout>, // Add this field
     function_ids: HashMap<String, FuncId>, // Map function names to FuncId
     variable_types: HashMap<String, AstType>, // Change Variable to String
 }
@@ -33,60 +38,81 @@ impl<'a> CodeGenerator<'a> {
             module,
             builder_context: FunctionBuilderContext::new(),
             struct_types: HashMap::new(),
+            struct_layouts: HashMap::new(), // Initialize the new field
             function_ids: HashMap::new(),
             variable_types: HashMap::new(),
         }
     }
 
     pub fn compile_program(&mut self, program: &Program) -> Result<()> {
-        // Create function signature for main
-        let mut sig = self.module.make_signature();
-        sig.returns.push(AbiParam::new(types::I64)); // Assuming main returns an i64
-        let func_id = self.module.declare_function("main", Linkage::Export, &sig)?;
-
-        // Create function context
-        let mut func_ctx = FunctionBuilderContext::new();
-        let mut ctx = self.module.make_context();
-        ctx.func.signature = sig;
-
-        // Create a local variables map for the main function
-        let mut variables = HashMap::new();
-
-        let mut loop_stack = Vec::new(); // Initialize the loop context stack
-
-        {
-            let mut builder = FunctionBuilder::new(&mut ctx.func, &mut func_ctx);
-
-            let entry_block = builder.create_block();
-            builder.switch_to_block(entry_block);
-            // Append function parameters to the block (none in this case)
-
-            for stmt in &program.statements {
-                self.compile_stmt(stmt, &mut builder, &mut variables, &mut loop_stack)?;
-
-                if self.is_current_block_terminated(&builder) {
-                    // The block is terminated, no need to process further statements
-                    break;
-                }
+        // First pass: compile all struct definitions
+        for stmt in &program.statements {
+            if let Stmt::StructDef { name, fields } = stmt {
+                self.compile_struct_def(name, fields)?;
             }
-
-            // Ensure the function has a return instruction if not already terminated
-            if !self.is_current_block_terminated(&builder) {
-                // Return 0 by default if no return statement is encountered
-                let zero = builder.ins().iconst(types::I64, 0);
-                builder.ins().return_(&[zero]);
-            }
-
-            // Seal all blocks after defining them
-            builder.seal_all_blocks();
-
-            builder.finalize();
         }
 
-        self.module.define_function(func_id, &mut ctx)?;
+        // Second pass: compile all function definitions
+        let mut has_main = false;
+        for stmt in &program.statements {
+            if let Stmt::FuncDef { func_decl, body } = stmt {
+                if func_decl.name == "main" {
+                    has_main = true;
+                }
+                self.compile_func_def(func_decl, body)?;
+            }
+        }
 
-        // Store the function ID
-        self.function_ids.insert("main".to_string(), func_id);
+        // If no main function was found, create a default one
+        if !has_main {
+            // Create function signature for main
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("main", Linkage::Export, &sig)?;
+
+            // Create function context
+            let mut func_ctx = FunctionBuilderContext::new();
+            let mut ctx = self.module.make_context();
+            ctx.func.signature = sig;
+
+            // Create a local variables map for the main function
+            let mut variables = HashMap::new();
+            let mut loop_stack = Vec::new();
+
+            {
+                let mut builder = FunctionBuilder::new(&mut ctx.func, &mut func_ctx);
+                let entry_block = builder.create_block();
+                builder.switch_to_block(entry_block);
+
+                // Compile all non-function statements as part of main
+                for stmt in &program.statements {
+                    match stmt {
+                        Stmt::FuncDef { .. } | Stmt::StructDef { .. } => {
+                            // Skip function and struct definitions as they're already handled
+                            continue;
+                        }
+                        _ => {
+                            self.compile_stmt(stmt, &mut builder, &mut variables, &mut loop_stack)?;
+                            if self.is_current_block_terminated(&builder) {
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // Ensure the function has a return instruction if not already terminated
+                if !self.is_current_block_terminated(&builder) {
+                    let zero = builder.ins().iconst(types::I64, 0);
+                    builder.ins().return_(&[zero]);
+                }
+
+                builder.seal_all_blocks();
+                builder.finalize();
+            }
+
+            self.module.define_function(func_id, &mut ctx)?;
+            self.function_ids.insert("main".to_string(), func_id);
+        }
 
         Ok(())
     }
@@ -307,10 +333,10 @@ impl<'a> CodeGenerator<'a> {
     pub fn compile_expr(
         &mut self,
         expr: &Expr,
-        builder_opt: Option<&mut FunctionBuilder>,
+        mut builder_opt: Option<&mut FunctionBuilder>,
         variables: &mut HashMap<String, Variable>,
     ) -> Result<Value> {
-        if let Some(builder) = builder_opt {
+        if let Some(builder) = builder_opt.as_deref_mut() {
             if self.is_current_block_terminated(builder) {
                 return Err(anyhow::anyhow!("Cannot add instructions to a terminated block"));
             }
@@ -393,12 +419,12 @@ impl<'a> CodeGenerator<'a> {
                 }
                 Expr::StructInit { struct_name, fields } => {
                     // Get struct size
-                    let struct_size = self.get_struct_size(struct_name)?;
+                    let _struct_size = self.get_struct_size(struct_name)?;
                     
                     // Allocate space on stack with proper alignment (using 8 for 64-bit alignment)
                     let stack_slot = builder.create_sized_stack_slot(StackSlotData::new(
                         StackSlotKind::ExplicitSlot,
-                        struct_size as u32,
+                        _struct_size as u32,
                         8  // alignment
                     ));
                     
@@ -419,36 +445,22 @@ impl<'a> CodeGenerator<'a> {
                     Ok(builder.ins().stack_addr(types::I64, stack_slot, 0))
                 },
                 Expr::StructAccess(struct_expr, field_name) => {
-                    // Get pointer to struct
-                    let struct_ptr = self.compile_expr(struct_expr, Some(builder), variables)?;
+                    let struct_val = self.compile_expr(struct_expr, Some(builder), variables)?;
+                    let struct_type = self.get_expr_type(struct_expr, builder)?;
                     
-                    // Get the struct type name
-                    let struct_type = match &**struct_expr {
-                        Expr::Variable(var_name) => {
-                            // Direct variable access
-                            if let AstType::Struct(name) = &self.get_variable_type(var_name, builder)? {
-                                name.clone()
-                            } else {
-                                return Err(anyhow::anyhow!("Expected struct type for variable {}", var_name));
-                            }
-                        }
-                        Expr::StructAccess(inner_struct, inner_field) => {
-                            // Nested struct access
-                            if let AstType::Struct(name) = self.get_field_type(inner_struct, inner_field, builder)? {
-                                name
-                            } else {
-                                return Err(anyhow::anyhow!("Expected struct type for field {}", inner_field));
-                            }
-                        }
-                        _ => return Err(anyhow::anyhow!("Expected struct variable or field access")),
-                    };
-                    
-                    // Get field offset
-                    let field_offset = self.get_struct_field_offset(&struct_type, field_name)?;
-                    
-                    // Load field value
-                    let addr = builder.ins().iadd_imm(struct_ptr, field_offset as i64);
-                    Ok(builder.ins().load(types::I64, MemFlags::new(), addr, 0))
+                    match struct_type {
+                        AstType::Struct(struct_name) => {
+                            // Get struct field offset
+                            let field_offset = self.get_struct_field_offset(&struct_name, field_name)?;
+                            
+                            // Create pointer to field
+                            let field_ptr = builder.ins().iadd_imm(struct_val, field_offset as i64);
+                            
+                            // Load field value
+                            Ok(builder.ins().load(types::I64, MemFlags::new(), field_ptr, 0))
+                        },
+                        _ => Err(anyhow::anyhow!("Cannot access field of non-struct type")),
+                    }
                 },
                 _ => unimplemented!("Expression {:?} not implemented", expr),
             }
@@ -593,7 +605,7 @@ impl<'a> CodeGenerator<'a> {
             AstType::Void => Ok(types::INVALID), // Use types::INVALID for void
             AstType::Struct(name) => {
                 // Calculate the size of the struct
-                let struct_size = self.get_struct_size(name)?;
+                let _struct_size = self.get_struct_size(name)?;
                 // Use a custom type or a pointer to represent the struct
                 // For simplicity, we can still use I64 as a pointer to the struct
                 Ok(types::I64)
@@ -624,8 +636,19 @@ impl<'a> CodeGenerator<'a> {
     }
 
     fn compile_struct_def(&mut self, name: &str, fields: &[(String, AstType)]) -> Result<()> {
-        // Store the struct definition in our struct_types map
+        // Store the struct definition
         self.struct_types.insert(name.to_string(), fields.to_vec());
+        
+        // Calculate and store field offsets
+        let mut offset = 0;
+        let mut field_offsets = HashMap::new();
+        
+        for (field_name, field_type) in fields {
+            field_offsets.insert(field_name.clone(), offset);
+            offset += self.get_type_size(field_type)?;
+        }
+        
+        self.struct_layouts.insert(name.to_string(), StructLayout { field_offsets });
         Ok(())
     }
 
@@ -658,18 +681,21 @@ impl<'a> CodeGenerator<'a> {
         }
     }
 
-    fn get_struct_field_offset(&self, struct_name: &str, field_name: &str) -> Result<usize> {
-        if let Some(fields) = self.struct_types.get(struct_name) {
-            let mut offset = 0;
-            for (name, field_type) in fields {
-                if name == field_name {
-                    return Ok(offset);
-                }
-                offset += self.get_type_size(field_type)?;
+    fn get_struct_field_offset(&self, struct_name: &str, field_name: &str) -> Result<usize, CompilerError> {
+        if let Some(struct_def) = self.struct_layouts.get(struct_name) {
+            if let Some(&offset) = struct_def.field_offsets.get(field_name) {
+                Ok(offset)
+            } else {
+                Err(CompilerError::new(
+                    format!("Field {} not found in struct {}", field_name, struct_name),
+                    0, 0, "".to_string(), ErrorType::Semantic,
+                ))
             }
-            Err(anyhow::anyhow!("Field {} not found in struct {}", field_name, struct_name))
         } else {
-            Err(anyhow::anyhow!("Undefined struct: {}", struct_name))
+            Err(CompilerError::new(
+                format!("Struct {} not found", struct_name),
+                0, 0, "".to_string(), ErrorType::Semantic,
+            ))
         }
     }
 
@@ -716,6 +742,21 @@ impl<'a> CodeGenerator<'a> {
             _ => Err(anyhow::anyhow!("Expected struct variable or field access")),
         }
     }
+
+    fn get_expr_type(&self, expr: &Expr, builder: &FunctionBuilder) -> Result<AstType> {
+        match expr {
+            Expr::IntLiteral(_) => Ok(AstType::Int),
+            Expr::BoolLiteral(_) => Ok(AstType::Bool),
+            Expr::StringLiteral(_) => Ok(AstType::String),
+            Expr::CharLiteral(_) => Ok(AstType::Char),
+            Expr::Variable(name) => self.get_variable_type(name, builder),
+            Expr::StructAccess(struct_expr, field_name) => {
+                self.get_field_type(struct_expr, field_name, builder)
+            }
+            // Add other expression types as needed
+            _ => Err(anyhow::anyhow!("Type inference not implemented for this expression")),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -724,7 +765,7 @@ mod tests {
     use cranelift_jit::JITBuilder;
     use std::mem::transmute;
 
-    // Helper function to run code
+    // Helper function for tests
     fn run_code<T>(module: &mut JITModule, func_id: FuncId) -> T {
         // Finalize the function definitions
         module.finalize_definitions().unwrap();
@@ -734,6 +775,16 @@ mod tests {
 
         // Cast the code pointer to a callable function
         unsafe { transmute::<_, fn() -> T>(code)() }
+    }
+
+    fn setup_test_codegen() -> CodeGenerator<'static> {
+        let isa = cranelift_native::builder()
+            .unwrap()
+            .finish(settings::Flags::new(settings::builder()))
+            .unwrap();
+        let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        let module = Box::leak(Box::new(JITModule::new(builder)));
+        CodeGenerator::new(module)
     }
 
     #[test]
@@ -1476,6 +1527,18 @@ mod tests {
         assert_eq!(codegen.get_struct_field_offset("Person", "next").unwrap(), 89);
     }
 }
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

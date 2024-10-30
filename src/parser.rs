@@ -108,35 +108,85 @@ impl Parser {
     }
 
     fn parse_primary(&mut self) -> Result<Expr, CompilerError> {
-        match self.tokens.next().map(|t| t.kind) {
-            Some(TokenKind::IntLiteral(value)) => Ok(Expr::IntLiteral(value.into())), // Convert i32 to i64
+        let mut expr = match self.tokens.next().map(|t| t.kind) {
+            Some(TokenKind::IntLiteral(value)) => Ok(Expr::IntLiteral(value.into())),
             Some(TokenKind::BoolLiteral(value)) => Ok(Expr::BoolLiteral(value)),
             Some(TokenKind::Identifier(name)) => {
-                // Check if this is a function call
-                if let Some(Token { kind: TokenKind::OpenParen, .. }) = self.tokens.peek() {
-                    self.tokens.next(); // consume (
-                    let mut args = Vec::new();
-                    
-                    while let Some(token) = self.tokens.peek() {
-                        if token.kind == TokenKind::CloseParen {
-                            self.tokens.next(); // consume )
-                            break;
+                // Check if this is a function call or struct initialization
+                if let Some(token) = self.tokens.peek() {
+                    match token.kind {
+                        TokenKind::OpenParen => {
+                            self.tokens.next(); // consume (
+                            let mut args = Vec::new();
+                            
+                            while let Some(token) = self.tokens.peek() {
+                                if token.kind == TokenKind::CloseParen {
+                                    self.tokens.next(); // consume )
+                                    break;
+                                }
+                                
+                                args.push(self.parse_expression()?);
+                                
+                                if let Some(Token { kind: TokenKind::Comma, .. }) = self.tokens.peek() {
+                                    self.tokens.next(); // consume comma
+                                }
+                            }
+                            
+                            Ok(Expr::FuncCall(name.to_string(), args))
                         }
-                        
-                        args.push(self.parse_expression()?);
-                        
-                        if let Some(Token { kind: TokenKind::Comma, .. }) = self.tokens.peek() {
-                            self.tokens.next(); // consume comma
+                        TokenKind::OpenBrace => {
+                            self.tokens.next(); // consume {
+                            let mut fields = Vec::new();
+                            
+                            while let Some(token) = self.tokens.peek() {
+                                if token.kind == TokenKind::CloseBrace {
+                                    self.tokens.next(); // consume }
+                                    break;
+                                }
+                                
+                                let field_name = if let Some(Token { kind: TokenKind::Identifier(name), .. }) = self.tokens.next() {
+                                    name
+                                } else {
+                                    return Err(self.error("Expected field name"));
+                                };
+                                
+                                self.expect_token(&TokenKind::Colon)?;
+                                let field_value = self.parse_expression()?;
+                                fields.push((field_name, field_value));
+                                
+                                if let Some(Token { kind: TokenKind::Comma, .. }) = self.tokens.peek() {
+                                    self.tokens.next(); // consume comma
+                                }
+                            }
+                            
+                            Ok(Expr::StructInit {
+                                struct_name: name,
+                                fields,
+                            })
                         }
+                        _ => Ok(Expr::Variable(name)),
                     }
-                    
-                    Ok(Expr::FuncCall(name.to_string(), args))
                 } else {
-                    Ok(Expr::Variable(name.to_string()))
+                    Ok(Expr::Variable(name))
                 }
             }
             _ => Err(self.error("Unexpected token")),
+        }?;
+
+        // Handle field access with dot operator
+        while let Some(Token { kind: TokenKind::Dot, .. }) = self.tokens.peek() {
+            self.tokens.next(); // consume .
+            
+            let field_name = if let Some(Token { kind: TokenKind::Identifier(name), .. }) = self.tokens.next() {
+                name
+            } else {
+                return Err(self.error("Expected field name after dot"));
+            };
+            
+            expr = Expr::StructAccess(Box::new(expr), field_name);
         }
+
+        Ok(expr)
     }
 
     fn parse_operator(&mut self) -> Option<BinOp> {
@@ -670,5 +720,115 @@ mod tests {
         let result = parser.parse_struct_definition();
         assert!(result.is_err());
         assert!(result.unwrap_err().message.contains("Expected : after field name"));
+    }
+
+    #[test]
+    fn test_parse_struct_field_access() {
+        let tokens = vec![
+            Token::new(TokenKind::Identifier("point".to_string()), 1, 1, "point".to_string()),
+            Token::new(TokenKind::Dot, 1, 6, ".".to_string()),
+            Token::new(TokenKind::Identifier("x".to_string()), 1, 7, "x".to_string()),
+            Token::new(TokenKind::Semicolon, 1, 8, ";".to_string()),
+        ];
+        let mut parser = Parser::new(tokens, "".to_string());
+        let program = parser.parse().unwrap();
+
+        let expected_ast = Program::new(vec![
+            Stmt::ExprStmt(Box::new(Expr::StructAccess(
+                Box::new(Expr::Variable("point".to_string())),
+                "x".to_string(),
+            ))),
+        ]);
+
+        assert_eq!(program, expected_ast);
+    }
+
+    #[test]
+    fn test_parse_struct_initialization() {
+        let tokens = vec![
+            Token::new(TokenKind::Identifier("Point".to_string()), 1, 1, "Point".to_string()),
+            Token::new(TokenKind::OpenBrace, 1, 7, "{".to_string()),
+            Token::new(TokenKind::Identifier("x".to_string()), 1, 8, "x".to_string()),
+            Token::new(TokenKind::Colon, 1, 9, ":".to_string()),
+            Token::new(TokenKind::IntLiteral(3), 1, 11, "3".to_string()),
+            Token::new(TokenKind::Comma, 1, 12, ",".to_string()),
+            Token::new(TokenKind::Identifier("y".to_string()), 1, 14, "y".to_string()),
+            Token::new(TokenKind::Colon, 1, 15, ":".to_string()),
+            Token::new(TokenKind::IntLiteral(4), 1, 17, "4".to_string()),
+            Token::new(TokenKind::CloseBrace, 1, 18, "}".to_string()),
+            Token::new(TokenKind::Semicolon, 1, 19, ";".to_string()),
+        ];
+        let mut parser = Parser::new(tokens, "".to_string());
+        let program = parser.parse().unwrap();
+
+        let expected_ast = Program::new(vec![
+            Stmt::ExprStmt(Box::new(Expr::StructInit {
+                struct_name: "Point".to_string(),
+                fields: vec![
+                    ("x".to_string(), Expr::IntLiteral(3)),
+                    ("y".to_string(), Expr::IntLiteral(4)),
+                ],
+            })),
+        ]);
+
+        assert_eq!(program, expected_ast);
+    }
+
+    #[test]
+    fn test_parse_chained_field_access() {
+        let tokens = vec![
+            Token::new(TokenKind::Identifier("obj".to_string()), 1, 1, "obj".to_string()),
+            Token::new(TokenKind::Dot, 1, 4, ".".to_string()),
+            Token::new(TokenKind::Identifier("field1".to_string()), 1, 5, "field1".to_string()),
+            Token::new(TokenKind::Dot, 1, 11, ".".to_string()),
+            Token::new(TokenKind::Identifier("field2".to_string()), 1, 12, "field2".to_string()),
+            Token::new(TokenKind::Semicolon, 1, 18, ";".to_string()),
+        ];
+        let mut parser = Parser::new(tokens, "".to_string());
+        let program = parser.parse().unwrap();
+
+        let expected_ast = Program::new(vec![
+            Stmt::ExprStmt(Box::new(Expr::StructAccess(
+                Box::new(Expr::StructAccess(
+                    Box::new(Expr::Variable("obj".to_string())),
+                    "field1".to_string(),
+                )),
+                "field2".to_string(),
+            ))),
+        ]);
+
+        assert_eq!(program, expected_ast);
+    }
+
+    #[test]
+    fn test_parse_field_access_with_operation() {
+        let tokens = vec![
+            Token::new(TokenKind::Identifier("point".to_string()), 1, 1, "point".to_string()),
+            Token::new(TokenKind::Dot, 1, 6, ".".to_string()),
+            Token::new(TokenKind::Identifier("x".to_string()), 1, 7, "x".to_string()),
+            Token::new(TokenKind::Star, 1, 9, "*".to_string()),
+            Token::new(TokenKind::Identifier("point".to_string()), 1, 11, "point".to_string()),
+            Token::new(TokenKind::Dot, 1, 16, ".".to_string()),
+            Token::new(TokenKind::Identifier("x".to_string()), 1, 17, "x".to_string()),
+            Token::new(TokenKind::Semicolon, 1, 18, ";".to_string()),
+        ];
+        let mut parser = Parser::new(tokens, "".to_string());
+        let program = parser.parse().unwrap();
+
+        let expected_ast = Program::new(vec![
+            Stmt::ExprStmt(Box::new(Expr::BinaryOp(
+                Box::new(Expr::StructAccess(
+                    Box::new(Expr::Variable("point".to_string())),
+                    "x".to_string(),
+                )),
+                BinOp::Multiply,
+                Box::new(Expr::StructAccess(
+                    Box::new(Expr::Variable("point".to_string())),
+                    "x".to_string(),
+                )),
+            ))),
+        ]);
+
+        assert_eq!(program, expected_ast);
     }
 }
