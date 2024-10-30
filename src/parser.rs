@@ -33,7 +33,26 @@ impl Parser {
             Some(TokenKind::Return) => {
                 self.tokens.next(); // consume Return token
                 let expr = self.parse_expression()?;
+                // Expect semicolon after return statement
+                self.expect_token(&TokenKind::Semicolon)?;
                 Ok(Stmt::Return(Box::new(expr)))
+            }
+            Some(TokenKind::Let) => {
+                self.tokens.next(); // consume Let token
+                let name = if let Some(Token { kind: TokenKind::Identifier(name), .. }) = self.tokens.next() {
+                    name
+                } else {
+                    return Err(self.error("Expected identifier after let"));
+                };
+                self.expect_token(&TokenKind::Colon)?;
+                let type_name = self.parse_type()?;
+                self.expect_token(&TokenKind::Equal)?;
+                let expr = self.parse_expression()?;
+                self.expect_token(&TokenKind::Semicolon)?;
+                Ok(Stmt::VarAssign {
+                    name,
+                    expr: Box::new(expr),
+                })
             }
             Some(TokenKind::Identifier(_)) => {
                 if self.is_struct_definition() {
@@ -42,11 +61,13 @@ impl Parser {
                     Ok(self.parse_assignment()?)
                 } else {
                     let expr = self.parse_expression()?;
+                    self.expect_token(&TokenKind::Semicolon)?;
                     Ok(Stmt::ExprStmt(Box::new(expr)))
                 }
             }
             _ => {
                 let expr = self.parse_expression()?;
+                self.expect_token(&TokenKind::Semicolon)?;
                 Ok(Stmt::ExprStmt(Box::new(expr)))
             }
         }
@@ -145,20 +166,63 @@ impl Parser {
     }
 
     fn parse_function_definition(&mut self) -> Result<Stmt, CompilerError> {
-        // Assume the current token is the function keyword
-        self.tokens.next(); // Consume 'fn'
+        // Consume 'fn' keyword
+        self.expect_token(&TokenKind::Fn)?;
         
+        // Parse function name
         let name = if let Some(Token { kind: TokenKind::Identifier(name), .. }) = self.tokens.next() {
             name
         } else {
-            Err(self.error("Expected function name"))?
+            return Err(self.error("Expected function name"));
         };
 
-        // Parse parameter list and return type
-        let params = self.parse_parameters()?;
-        let return_type = self.parse_return_type()?;
+        // Parse parameter list
+        self.expect_token(&TokenKind::OpenParen)?;
+        let mut params = Vec::new();
+        
+        while let Some(token) = self.tokens.peek() {
+            if token.kind == TokenKind::CloseParen {
+                self.tokens.next(); // consume )
+                break;
+            }
 
-        // Create the function declaration
+            // Parse parameter name
+            let param_name = if let Some(Token { kind: TokenKind::Identifier(name), .. }) = self.tokens.next() {
+                name
+            } else {
+                return Err(self.error("Expected parameter name"));
+            };
+
+            // Expect :
+            self.expect_token(&TokenKind::Colon)?;
+
+            // Parse parameter type
+            let param_type = self.parse_type()?;
+            params.push((param_name, param_type));
+
+            // Handle comma
+            if let Some(token) = self.tokens.peek() {
+                if token.kind == TokenKind::Comma {
+                    self.tokens.next();
+                } else if token.kind != TokenKind::CloseParen {
+                    return Err(self.error("Expected comma or closing parenthesis"));
+                }
+            }
+        }
+
+        // Parse return type
+        let return_type = if let Some(token) = self.tokens.peek() {
+            if token.kind == TokenKind::Arrow {
+                self.tokens.next(); // consume ->
+                self.parse_type()?
+            } else {
+                AstType::Void
+            }
+        } else {
+            return Err(self.error("Unexpected end of input"));
+        };
+
+        // Create function declaration
         let func_decl = FuncDecl {
             name,
             params,
@@ -174,68 +238,20 @@ impl Parser {
         })
     }
 
-    fn parse_parameters(&mut self) -> Result<Vec<(String, AstType)>, CompilerError> {
-        let mut params = Vec::new();
-        
-        // Expect opening parenthesis
-        self.expect_token(&TokenKind::OpenParen)?;
-        
-        // Parse parameters until we hit )
-        while let Some(token) = self.tokens.peek() {
-            if token.kind == TokenKind::CloseParen {
-                self.tokens.next(); // consume the )
-                break;
-            }
-
-            // Parse parameter name
-            let param_name = if let Some(Token { kind: TokenKind::Identifier(name), .. }) = self.tokens.next() {
-                name
-            } else {
-                Err(self.error("Expected parameter name"))?
-            };
-
-            // Expect :
-            self.expect_token(&TokenKind::Colon)?;
-
-            // Parse parameter type
-            let param_type = self.parse_type()?;
-            params.push((param_name, param_type));
-
-            // Handle optional comma
-            if let Some(Token { kind: TokenKind::Comma, .. }) = self.tokens.peek() {
-                self.tokens.next();
-            }
-        }
-
-        Ok(params)
-    }
-
-    fn parse_return_type(&mut self) -> Result<AstType, CompilerError> {
-        // Check for ->
-        if let Some(Token { kind: TokenKind::Arrow, .. }) = self.tokens.peek() {
-            self.tokens.next();
-            self.parse_type()
-        } else {
-            Ok(AstType::Void)
-        }
-    }
-
     fn parse_block(&mut self) -> Result<Stmt, CompilerError> {
-        // Expect opening brace
         self.expect_token(&TokenKind::OpenBrace)?;
         
         let mut statements = Vec::new();
         
-        // Parse statements until we hit }
         while let Some(token) = self.tokens.peek() {
-            if token.kind == TokenKind::CloseBrace {  // Compare TokenKind instead of dereferencing
-                self.tokens.next();
-                break;
+            if token.kind == TokenKind::CloseBrace {
+                self.tokens.next(); // consume }
+                return Ok(Stmt::Block(statements));
             }
             statements.push(self.parse_statement()?);
         }
-
-        Ok(Stmt::Block(statements))
+        
+        Err(self.error("Unclosed block"))
     }
 
     fn parse_struct_definition(&mut self) -> Result<Stmt, CompilerError> {
@@ -378,7 +394,7 @@ impl Parser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::token::Token;
+    use crate::token::{Token, TokenKind};
     use crate::ast::{Expr, Stmt, Program, BinOp};
 
     #[test]
@@ -387,9 +403,10 @@ mod tests {
             Token::new(TokenKind::IntLiteral(42), 1, 1, "42".to_string()),
             Token::new(TokenKind::Plus, 1, 2, "+".to_string()),
             Token::new(TokenKind::IntLiteral(8), 1, 3, "8".to_string()),
+            Token::new(TokenKind::Semicolon, 1, 4, ";".to_string()),
         ];
         let mut parser = Parser::new(tokens, "".to_string());
-        let program = parser.parse().unwrap();  // Handle Result
+        let program = parser.parse().unwrap();
 
         let expected_ast = Program::new(vec![
             Stmt::ExprStmt(Box::new(Expr::BinaryOp(
@@ -408,9 +425,10 @@ mod tests {
             Token::new(TokenKind::IntLiteral(10), 1, 1, "10".to_string()),
             Token::new(TokenKind::Minus, 1, 2, "-".to_string()),
             Token::new(TokenKind::IntLiteral(5), 1, 3, "5".to_string()),
+            Token::new(TokenKind::Semicolon, 1, 4, ";".to_string()),
         ];
         let mut parser = Parser::new(tokens, "".to_string());
-        let program = parser.parse().unwrap();  // Handle Result
+        let program = parser.parse().unwrap();
 
         let expected_ast = Program::new(vec![
             Stmt::ExprStmt(Box::new(Expr::BinaryOp(
@@ -427,9 +445,10 @@ mod tests {
     fn test_parse_single_literal_expression() {
         let tokens = vec![
             Token::new(TokenKind::IntLiteral(7), 1, 1, "7".to_string()),
+            Token::new(TokenKind::Semicolon, 1, 2, ";".to_string()),
         ];
         let mut parser = Parser::new(tokens, "".to_string());
-        let program = parser.parse().unwrap();  // Handle Result
+        let program = parser.parse().unwrap();
 
         let expected_ast = Program::new(vec![
             Stmt::ExprStmt(Box::new(Expr::IntLiteral(7))),
@@ -439,14 +458,19 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_unexpected_token() {
+    fn test_parse_boolean_literal() {
         let tokens = vec![
-            Token::new(TokenKind::Plus, 1, 1, "+".to_string()),
+            Token::new(TokenKind::BoolLiteral(true), 1, 1, "true".to_string()),
+            Token::new(TokenKind::Semicolon, 1, 2, ";".to_string()),
         ];
         let mut parser = Parser::new(tokens, "".to_string());
-        let result = parser.parse();
-        assert!(result.is_err());
-        assert!(result.unwrap_err().message.contains("Unexpected token"));
+        let program = parser.parse().unwrap();
+
+        let expected_ast = Program::new(vec![
+            Stmt::ExprStmt(Box::new(Expr::BoolLiteral(true))),
+        ]);
+
+        assert_eq!(program, expected_ast);
     }
 
     #[test]
@@ -455,12 +479,14 @@ mod tests {
             Token::new(TokenKind::IntLiteral(1), 1, 1, "1".to_string()),
             Token::new(TokenKind::Plus, 1, 2, "+".to_string()),
             Token::new(TokenKind::IntLiteral(2), 1, 3, "2".to_string()),
-            Token::new(TokenKind::IntLiteral(3), 1, 4, "3".to_string()),
-            Token::new(TokenKind::Minus, 1, 5, "-".to_string()),
-            Token::new(TokenKind::IntLiteral(4), 1, 6, "4".to_string()),
+            Token::new(TokenKind::Semicolon, 1, 4, ";".to_string()),
+            Token::new(TokenKind::IntLiteral(3), 1, 5, "3".to_string()),
+            Token::new(TokenKind::Minus, 1, 6, "-".to_string()),
+            Token::new(TokenKind::IntLiteral(4), 1, 7, "4".to_string()),
+            Token::new(TokenKind::Semicolon, 1, 8, ";".to_string()),
         ];
         let mut parser = Parser::new(tokens, "".to_string());
-        let program = parser.parse().unwrap();  // Handle Result
+        let program = parser.parse().unwrap();
 
         let expected_ast = Program::new(vec![
             Stmt::ExprStmt(Box::new(Expr::BinaryOp(
@@ -479,18 +505,14 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_boolean_literal() {
+    fn test_parse_unexpected_token() {
         let tokens = vec![
-            Token::new(TokenKind::BoolLiteral(true), 1, 1, "true".to_string()),
+            Token::new(TokenKind::Plus, 1, 1, "+".to_string()),
         ];
         let mut parser = Parser::new(tokens, "".to_string());
-        let program = parser.parse().unwrap();  // Handle Result
-
-        let expected_ast = Program::new(vec![
-            Stmt::ExprStmt(Box::new(Expr::BoolLiteral(true))),
-        ]);
-
-        assert_eq!(program, expected_ast);
+        let result = parser.parse();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("Unexpected token"));
     }
 
     #[test]
@@ -567,7 +589,8 @@ mod tests {
             Token::new(TokenKind::Identifier("x".to_string()), 1, 16, "x".to_string()),
             Token::new(TokenKind::Plus, 1, 17, "+".to_string()),
             Token::new(TokenKind::Identifier("y".to_string()), 1, 18, "y".to_string()),
-            Token::new(TokenKind::CloseBrace, 1, 19, "}".to_string()),
+            Token::new(TokenKind::Semicolon, 1, 19, ";".to_string()),
+            Token::new(TokenKind::CloseBrace, 1, 20, "}".to_string()),
         ];
 
         let mut parser = Parser::new(tokens, "".to_string());

@@ -19,22 +19,15 @@ use error::{CompilerError, ErrorType};
 fn main() {
     // Sample source code in your language
     let source_code = "
-        fn add(a: i32, b: i32) -> i32 {
-            return a + b;
-        }
-
-        fn main() -> i32 {
-            let x: i32 = 5;
-            let y: i32 = 3;
-            let result: i32 = add(x, y * 2);
-            return result;
-        }
     ";
 
     // Step 1: Lexing
     let mut lexer = Lexer::new(source_code);
     let tokens = match lexer.tokenize() {
-        Ok(tokens) => tokens,
+        Ok(tokens) => {
+            println!("Tokens: {:?}", tokens);
+            tokens
+        }
         Err(e) => {
             eprintln!("{}", e.display());
             return;
@@ -44,7 +37,10 @@ fn main() {
     // Step 2: Parsing
     let mut parser = Parser::new(tokens, source_code.to_string());
     let program = match parser.parse() {
-        Ok(program) => program,
+        Ok(program) => {
+            println!("AST: {:?}", program);
+            program
+        }
         Err(e) => {
             eprintln!("{}", e.display());
             return;
@@ -54,7 +50,7 @@ fn main() {
     // Step 3: Validation
     let mut validator = AstValidator::new();
     if let Err(error) = validator.validate_program(&program) {
-        println!("Validation error: {:?}", error);
+        eprintln!("Validation error: {:?}", error);
         return;
     }
     println!("AST is valid.");
@@ -65,10 +61,8 @@ fn main() {
     let mut jit_module = JITModule::new(jit_builder);
     let mut codegen = CodeGenerator::new(&mut jit_module);
     if let Err(error) = codegen.compile_program(&program) {
-        println!("Code generation error: {:?}", error);
+        eprintln!("Code generation error: {:?}", error);
         return;
     }
     println!("Code generation successful.");
-
-
 }

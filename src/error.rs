@@ -17,6 +17,17 @@ pub enum ErrorType {
     CodeGen,
 }
 
+impl ErrorType {
+    fn as_str(&self) -> &str {
+        match self {
+            ErrorType::Lexical => "Lexer",
+            ErrorType::Syntax => "Parser",
+            ErrorType::Semantic => "Type Checker",
+            ErrorType::CodeGen => "Code Generator",
+        }
+    }
+}
+
 impl CompilerError {
     pub fn new(message: String, line: usize, column: usize, source_line: String, error_type: ErrorType) -> Self {
         CompilerError {
@@ -30,7 +41,12 @@ impl CompilerError {
 
     pub fn display(&self) -> String {
         let mut error_display = String::new();
-        error_display.push_str(&format!("Error: {} at line {}, column {}\n", self.message, self.line, self.column));
+        error_display.push_str(&format!("[{}] Error: {} at line {}, column {}\n", 
+            self.error_type.as_str(),
+            self.message, 
+            self.line, 
+            self.column
+        ));
         error_display.push_str(&format!("{}\n", self.source_line));
         error_display.push_str(&format!("{}^\n", " ".repeat(self.column - 1)));
         error_display

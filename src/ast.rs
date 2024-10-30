@@ -10,7 +10,7 @@ pub enum Expr {
 
     // Variable handling
     Variable(String),
-    Assignment(String, Box<Expr>),
+    Assignment(Box<Expr>, Box<Expr>),
 
     // Unary Operations
     UnaryOp(UnaryOp, Box<Expr>),
