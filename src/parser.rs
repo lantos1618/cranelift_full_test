@@ -39,6 +39,9 @@ impl Parser {
             Some(TokenKind::Let) => {
                 self.parse_let_statement()
             }
+            Some(TokenKind::If) => {
+                self.parse_if_statement()
+            }
             Some(TokenKind::Struct) => {
                 self.tokens.next(); // consume struct keyword
                 let name = if let Some(Token { kind: TokenKind::Identifier(name), .. }) = self.tokens.next() {
@@ -110,9 +113,9 @@ impl Parser {
                     };
                     expr = Expr::StructAccess(Box::new(expr), field_name);
                 }
-                TokenKind::Plus | TokenKind::Minus | TokenKind::Star | TokenKind::Slash | TokenKind::Percent => {
+                TokenKind::Plus | TokenKind::Minus | TokenKind::Star | TokenKind::Slash | TokenKind::Percent | TokenKind::LessThan | TokenKind::LessThanEqual | TokenKind::GreaterThan | TokenKind::GreaterThanEqual => {
                     if let Some(op) = self.parse_operator() {
-                        let right = self.parse_expression()?;
+                        let right = self.parse_primary()?;
                         expr = Expr::BinaryOp(Box::new(expr), op, Box::new(right));
                     }
                 }
@@ -200,6 +203,22 @@ impl Parser {
             Some(TokenKind::Percent) => {
                 self.tokens.next();
                 Some(BinOp::Modulus)
+            }
+            Some(TokenKind::LessThan) => {
+                self.tokens.next();
+                Some(BinOp::LessThan)
+            }
+            Some(TokenKind::LessThanEqual) => {
+                self.tokens.next();
+                Some(BinOp::LessThanEqual)
+            }
+            Some(TokenKind::GreaterThan) => {
+                self.tokens.next();
+                Some(BinOp::GreaterThan)
+            }
+            Some(TokenKind::GreaterThanEqual) => {
+                self.tokens.next();
+                Some(BinOp::GreaterThanEqual)
             }
             _ => None,
         }
@@ -403,11 +422,16 @@ impl Parser {
             if token.kind == *expected {
                 Ok(token)
             } else {
-                Err(self.error(&format!(
-                    "Expected {:?}, found {:?}",
-                    expected,
-                    token.kind
-                )))
+                match expected {
+                    TokenKind::OpenParen => {
+                        Err(self.error("Expected ("))
+                    }
+                    _ => Err(self.error(&format!(
+                        "Expected {:?}, found {:?}",
+                        expected,
+                        token.kind
+                    )))
+                }
             }
         } else {
             Err(self.error("Unexpected end of file"))
@@ -469,6 +493,37 @@ impl Parser {
             name,
             var_type,
             init_expr: Some(Box::new(expr)),
+        })
+    }
+
+    fn parse_if_statement(&mut self) -> Result<Stmt, CompilerError> {
+        // Consume 'if' token
+        self.expect_token(&TokenKind::If)?;
+        
+        // Expect opening parenthesis
+        self.expect_token(&TokenKind::OpenParen)?;
+        
+        // Parse condition
+        let condition = self.parse_expression()?;
+        
+        // Expect closing parenthesis
+        self.expect_token(&TokenKind::CloseParen)?;
+        
+        // Parse then branch
+        let then_branch = Box::new(self.parse_block()?);
+        
+        // Check for else
+        let else_branch = if let Some(TokenKind::Else) = self.tokens.peek().map(|t| &t.kind) {
+            self.tokens.next(); // consume 'else'
+            Some(Box::new(self.parse_block()?))
+        } else {
+            None
+        };
+
+        Ok(Stmt::If {
+            condition: Box::new(condition),
+            then_branch,
+            else_branch,
         })
     }
 }
@@ -882,5 +937,91 @@ mod tests {
             }
             _ => panic!("Expected variable declaration"),
         }
+    }
+
+    #[test]
+    fn test_parse_if_with_parentheses() {
+        let tokens = vec![
+            Token::new(TokenKind::If, 1, 1, "if".to_string()),
+            Token::new(TokenKind::OpenParen, 1, 4, "(".to_string()),
+            Token::new(TokenKind::IntLiteral(10), 1, 5, "10".to_string()),
+            Token::new(TokenKind::LessThan, 1, 8, "<".to_string()),
+            Token::new(TokenKind::IntLiteral(20), 1, 10, "20".to_string()),
+            Token::new(TokenKind::CloseParen, 1, 12, ")".to_string()),
+            Token::new(TokenKind::OpenBrace, 1, 14, "{".to_string()),
+            Token::new(TokenKind::Return, 2, 5, "return".to_string()),
+            Token::new(TokenKind::IntLiteral(1), 2, 12, "1".to_string()),
+            Token::new(TokenKind::Semicolon, 2, 13, ";".to_string()),
+            Token::new(TokenKind::CloseBrace, 3, 1, "}".to_string()),
+        ];
+
+        let mut parser = Parser::new(tokens, "test source".to_string());
+        let stmt = parser.parse_statement().unwrap();
+
+        let expected_ast = Stmt::If {
+            condition: Box::new(Expr::BinaryOp(
+                Box::new(Expr::IntLiteral(10)), BinOp::LessThan, Box::new(Expr::IntLiteral(20))
+            )),
+            then_branch: Box::new(Stmt::Block(vec![Stmt::Return(Box::new(Expr::IntLiteral(1)))])),
+            else_branch: None,
+        };
+        assert_eq!(stmt, expected_ast); 
+        
+    }
+
+    #[test]
+    fn test_parse_if_without_parentheses() {
+        let tokens = vec![
+            Token::new(TokenKind::If, 1, 1, "if".to_string()),
+            Token::new(TokenKind::IntLiteral(10), 1, 4, "10".to_string()),
+            Token::new(TokenKind::LessThan, 1, 7, "<".to_string()),
+            Token::new(TokenKind::IntLiteral(20), 1, 9, "20".to_string()),
+            Token::new(TokenKind::OpenBrace, 1, 12, "{".to_string()),
+            Token::new(TokenKind::Return, 2, 5, "return".to_string()),
+            Token::new(TokenKind::IntLiteral(1), 2, 12, "1".to_string()),
+            Token::new(TokenKind::Semicolon, 2, 13, ";".to_string()),
+            Token::new(TokenKind::CloseBrace, 3, 1, "}".to_string()),
+        ];
+
+        let mut parser = Parser::new(tokens, "test source".to_string());
+        let result = parser.parse_statement();
+        
+        // Should fail because parentheses are required
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert!(error.message.contains("Expected ("));
+    }
+
+    #[test]
+    fn test_parse_if_with_less_equal() {
+        let tokens = vec![
+            Token::new(TokenKind::If, 1, 1, "if".to_string()),
+            Token::new(TokenKind::OpenParen, 1, 4, "(".to_string()),
+            Token::new(TokenKind::Identifier("n".to_string()), 1, 5, "n".to_string()),
+            Token::new(TokenKind::LessThanEqual, 1, 7, "<=".to_string()),
+            Token::new(TokenKind::IntLiteral(1), 1, 10, "1".to_string()),
+            Token::new(TokenKind::CloseParen, 1, 11, ")".to_string()),
+            Token::new(TokenKind::OpenBrace, 1, 13, "{".to_string()),
+            Token::new(TokenKind::Return, 2, 5, "return".to_string()),
+            Token::new(TokenKind::Identifier("n".to_string()), 2, 12, "n".to_string()),
+            Token::new(TokenKind::Semicolon, 2, 13, ";".to_string()),
+            Token::new(TokenKind::CloseBrace, 3, 1, "}".to_string()),
+        ];
+
+        let mut parser = Parser::new(tokens, "test source".to_string());
+        let stmt = parser.parse_statement().unwrap();
+
+        let expected_ast = Stmt::If {
+            condition: Box::new(Expr::BinaryOp(
+                Box::new(Expr::Variable("n".to_string())),
+                BinOp::LessThanEqual,
+                Box::new(Expr::IntLiteral(1))
+            )),
+            then_branch: Box::new(Stmt::Block(vec![
+                Stmt::Return(Box::new(Expr::Variable("n".to_string())))
+            ])),
+            else_branch: None,
+        };
+        assert_eq!(stmt, expected_ast);
     }
 }

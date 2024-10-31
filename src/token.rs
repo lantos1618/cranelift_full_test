@@ -39,14 +39,16 @@ pub enum TokenKind {
     Equal,
     Arrow,      // ->
     FatArrow,   // =>
-    BitAnd,
-    BitOr,
-    BitXor,
+    BitAnd,     // &
+    BitOr,      // |
+    BitXor,     // ^
     Not,
     ShiftLeft,  // <<
     ShiftRight, // >>
     LessThan,
+    LessThanEqual,
     GreaterThan,
+    GreaterThanEqual,
 
     // Delimiters
     OpenParen,    // (
@@ -59,6 +61,12 @@ pub enum TokenKind {
     Colon,
     Semicolon,
     Dot,
+
+    // Float-specific tokens
+    FAdd,
+    FSub,
+    FMul,
+    FDiv,
 }
 
 impl Token {

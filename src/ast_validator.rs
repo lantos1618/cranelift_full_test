@@ -99,6 +99,7 @@ impl AstValidator {
     fn validate_expr(&mut self, expr: &Expr) -> Result<AstType, CompilerError> {
         match expr {
             Expr::IntLiteral(_) => Ok(AstType::Int),
+            Expr::FloatLiteral(_) => Ok(AstType::Float),
             Expr::BoolLiteral(_) => Ok(AstType::Bool),
             Expr::StringLiteral(_) => Ok(AstType::String),
             Expr::CharLiteral(_) => Ok(AstType::Char),
@@ -124,6 +125,24 @@ impl AstValidator {
                         }
                         Ok(AstType::Int)
                     }
+                    BinOp::FAdd | BinOp::FSub | BinOp::FMul | BinOp::FDiv => {
+                        if left_type != AstType::Float || right_type != AstType::Float {
+                            return Err(CompilerError::new(
+                                format!("Invalid types for float operation: found {:?} and {:?}, expected Float", left_type, right_type),
+                                0, 0, "".to_string(), ErrorType::Semantic,
+                            ));
+                        }
+                        Ok(AstType::Float)
+                    }
+                    BinOp::FEqual | BinOp::FNotEqual | BinOp::FLessThan | BinOp::FLessThanEqual | BinOp::FGreaterThan | BinOp::FGreaterThanEqual => {
+                        if left_type != AstType::Float || right_type != AstType::Float {
+                            return Err(CompilerError::new(
+                                format!("Invalid types for float comparison: found {:?} and {:?}, expected Float", left_type, right_type),
+                                0, 0, "".to_string(), ErrorType::Semantic,
+                            ));
+                        }
+                        Ok(AstType::Bool)
+                    }
                     BinOp::And | BinOp::Or => {
                         if left_type != AstType::Bool || right_type != AstType::Bool {
                             return Err(CompilerError::new(
@@ -133,7 +152,7 @@ impl AstValidator {
                         }
                         Ok(AstType::Bool)
                     }
-                    BinOp::Equal | BinOp::NotEqual | BinOp::LessThan | BinOp::GreaterThan => {
+                    BinOp::Equal | BinOp::NotEqual | BinOp::LessThan | BinOp::GreaterThan | BinOp::LessThanEqual | BinOp::GreaterThanEqual => {
                         if left_type != right_type {
                             return Err(CompilerError::new(
                                 "Comparison requires same type operands".to_string(),

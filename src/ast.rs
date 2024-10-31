@@ -6,6 +6,7 @@ use serde::{Serialize, Deserialize};
 pub enum Expr {
     // Literals
     IntLiteral(i64),
+    FloatLiteral(f64),
     BoolLiteral(bool),
     StringLiteral(String),
     CharLiteral(char),
@@ -60,22 +61,45 @@ pub enum Expr {
 // Binary Operations
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum BinOp {
-    Add,         // +
-    Subtract,    // -
-    Multiply,    // *
-    Divide,      // /
-    Modulus,     // %   // Added modulus operator
-    And,         // &&
-    Or,          // ||
-    Equal,       // ==
-    NotEqual,    // !=
-    LessThan,    // <
-    GreaterThan, // >
-    BitAnd,      // &
-    BitOr,       // |
-    BitXor,      // ^
-    ShiftLeft,   // <<
-    ShiftRight,  // >>
+    // Integer arithmetic
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Modulus,
+    
+    // Integer comparisons
+    Equal,
+    NotEqual,
+    LessThan,
+    LessThanEqual,
+    GreaterThan,
+    GreaterThanEqual,
+    
+    // Logical operators
+    And,
+    Or,
+    
+    // Bitwise operators
+    BitAnd,
+    BitOr,
+    BitXor,
+    ShiftLeft,
+    ShiftRight,
+    
+    // Float arithmetic
+    FAdd,
+    FSub,
+    FMul,
+    FDiv,
+    
+    // Float comparisons
+    FEqual,
+    FNotEqual,
+    FLessThan,
+    FLessThanEqual,
+    FGreaterThan,
+    FGreaterThanEqual,
 }
 
 // Unary Operations
@@ -172,6 +196,7 @@ pub enum Stmt {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AstType {
     Int,
+    Float,
     Bool,
     String,
     Char,

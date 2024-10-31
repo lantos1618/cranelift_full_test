@@ -19,14 +19,18 @@ use cranelift_codegen::settings;
 fn main() {
     // Sample source code demonstrating key language features
     let source_code = r#"
+        fn fib(n: int) -> int {
+            if (n <= 1) {
+                return n;
+            }
+            return fib(n - 1) + fib(n - 2);
+        }
 
-        // Define the Point struct first
         struct Point {
             x: int,
             y: int,
         };
 
-        // Now we can use Point in our functions
         fn distance(p: Point) -> int {
             let x_squared: int = p.x * p.x;
             let y_squared: int = p.y * p.y;
@@ -35,7 +39,7 @@ fn main() {
 
         fn main() -> int {
             let point: Point = Point { x: 3, y: 4 };
-            return distance(point);
+            return distance(point) + fib(10);
         }
     "#;
 
