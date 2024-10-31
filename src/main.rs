@@ -19,6 +19,7 @@ use cranelift_codegen::settings;
 fn main() {
     // Sample source code demonstrating key language features
     let source_code = r#"
+
         // Define the Point struct first
         struct Point {
             x: int,
