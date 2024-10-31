@@ -1,6 +1,8 @@
 // ast.rs
 
-#[derive(Debug, Clone, PartialEq)]
+use serde::{Serialize, Deserialize};
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Expr {
     // Literals
     IntLiteral(i64),
@@ -56,7 +58,7 @@ pub enum Expr {
 }
 
 // Binary Operations
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum BinOp {
     Add,         // +
     Subtract,    // -
@@ -77,7 +79,7 @@ pub enum BinOp {
 }
 
 // Unary Operations
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum UnaryOp {
     Negate,    // - (numeric negation)
     Not,       // ! (logical negation)
@@ -87,7 +89,7 @@ pub enum UnaryOp {
 }
 
 // Pattern Matching
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Pattern {
     Literal(Expr), // Matching literals (e.g., 42)
     Variable(String), // Variable binding (e.g., x)
@@ -99,7 +101,7 @@ pub enum Pattern {
 }
 
 // Function declaration with types for parameters
-#[derive(Debug, Clone, PartialEq    )]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FuncDecl {
     pub name: String,
     pub params: Vec<(String, AstType)>, // Name and type of parameters
@@ -107,7 +109,7 @@ pub struct FuncDecl {
 }
 
 // Statement (Stmt) as before with minor additions
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Stmt {
     // Variable declaration
     VarDecl {
@@ -167,7 +169,7 @@ pub enum Stmt {
 }
 
 // Type system with Pointers, Generics, and Aliases
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AstType {
     Int,
     Bool,
@@ -189,7 +191,7 @@ pub enum AstType {
     Function(Vec<AstType>, Box<AstType>), // (parameter_types, return_type)
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Program {
     pub statements: Vec<Stmt>,
 }
@@ -198,5 +200,14 @@ pub struct Program {
 impl Program {
     pub fn new(statements: Vec<Stmt>) -> Self {
         Program { statements }
+    }
+
+    // Add serialization methods
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self)
+    }
+
+    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(json)
     }
 }

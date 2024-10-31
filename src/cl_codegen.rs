@@ -1,7 +1,7 @@
 use anyhow::Result;
 use cranelift::prelude::*;
 use cranelift_codegen::ir::immediates::Offset32;
-use cranelift_module::{FuncId, Linkage, Module};
+use cranelift_module::{FuncId, Linkage, Module, DataDescription};
 use cranelift_jit::JITModule;
 use crate::ast::*;
 use std::collections::HashMap;
@@ -16,6 +16,7 @@ pub struct LoopContext {
 
 pub struct StructLayout {
     pub field_offsets: HashMap<String, usize>,
+    pub total_size: usize,
 }
 
 // Add a scope management struct
@@ -42,6 +43,7 @@ pub struct CodeGenerator<'a> {
     struct_layouts: HashMap<String, StructLayout>, // Add this field
     function_ids: HashMap<String, FuncId>, // Map function names to FuncId
     scopes: Vec<Scope>,  // Stack of scopes
+    string_counter: usize,  // Add this field
 }
 
 impl<'a> CodeGenerator<'a> {
@@ -53,6 +55,7 @@ impl<'a> CodeGenerator<'a> {
             struct_layouts: HashMap::new(), // Initialize the new field
             function_ids: HashMap::new(),
             scopes: vec![Scope::new()], // Initialize with global scope
+            string_counter: 0,  // Initialize the counter
         }
     }
 
@@ -64,12 +67,22 @@ impl<'a> CodeGenerator<'a> {
             }
         }
 
-        // Second pass: compile all function definitions and other statements
+        // Second pass: compile all function declarations (including external ones)
+        for stmt in &program.statements {
+            match stmt {
+                Stmt::FuncExternDecl { name, lib: _ } => {
+                    self.compile_func_extern_decl(name)?;
+                }
+                _ => continue,
+            }
+        }
+
+        // Third pass: compile all function definitions and other statements
         let mut has_main = false;
         for stmt in &program.statements {
             match stmt {
-                Stmt::StructDef { .. } => {
-                    // Skip struct definitions as they're already handled
+                Stmt::StructDef { .. } | Stmt::FuncExternDecl { .. } => {
+                    // Skip struct definitions and external declarations as they're already handled
                     continue;
                 }
                 Stmt::FuncDef { func_decl, body } => {
@@ -100,7 +113,7 @@ impl<'a> CodeGenerator<'a> {
                             // Compile all non-function statements as part of main
                             for stmt in &program.statements {
                                 match stmt {
-                                    Stmt::FuncDef { .. } | Stmt::StructDef { .. } => {
+                                    Stmt::FuncDef { .. } | Stmt::StructDef { .. } | Stmt::FuncExternDecl { .. } => {
                                         continue;
                                     }
                                     _ => {
@@ -269,12 +282,17 @@ impl<'a> CodeGenerator<'a> {
             // Push new scope for function
             self.push_scope();
 
+            // Create a new variable index counter for this function
+            let mut var_index = 0;
+
             // Map function parameters to variables
             for (i, (name, param_type)) in func_decl.params.iter().enumerate() {
-                let var = Variable::new(self.current_scope().variables.len());
-                let cl_type = self.ast_type_to_cl_type(param_type)?;
+                let var = Variable::new(var_index);
+                var_index += 1;
                 
+                let cl_type = self.ast_type_to_cl_type(param_type)?;
                 builder.declare_var(var, cl_type);
+                
                 let val = builder.block_params(entry_block)[i];
                 builder.def_var(var, val);
                 
@@ -282,7 +300,8 @@ impl<'a> CodeGenerator<'a> {
                 self.current_scope().variable_types.insert(name.clone(), param_type.clone());
             }
 
-            self.compile_stmt(body, &mut builder, &mut loop_stack)?;
+            // Update compile_stmt to use the var_index counter
+            self.compile_stmt_with_var_index(body, &mut builder, &mut loop_stack, &mut var_index)?;
 
             // Pop function scope
             self.pop_scope();
@@ -308,8 +327,17 @@ impl<'a> CodeGenerator<'a> {
 
     pub fn compile_func_extern_decl(&mut self, func_decl: &FuncDecl) -> Result<()> {
         let sig = self.create_signature(&func_decl.params, &func_decl.return_type)?;
-        self.module
-            .declare_function(&func_decl.name, Linkage::Import, &sig)?;
+        
+        // Declare the function with Import linkage
+        let func_id = self.module.declare_function(
+            &func_decl.name,
+            Linkage::Import,
+            &sig
+        )?;
+
+        // Store the function ID for later use
+        self.function_ids.insert(func_decl.name.clone(), func_id);
+
         Ok(())
     }
 
@@ -445,6 +473,9 @@ impl<'a> CodeGenerator<'a> {
                         _ => Err(anyhow::anyhow!("Cannot access field of non-struct type")),
                     }
                 },
+                Expr::StringLiteral(s) => {
+                    self.compile_string_literal(s, builder)
+                }
                 _ => unimplemented!("Expression {:?} not implemented", expr),
             }
         } else {
@@ -619,60 +650,43 @@ impl<'a> CodeGenerator<'a> {
     }
 
     fn compile_struct_def(&mut self, name: &str, fields: &[(String, AstType)]) -> Result<()> {
-        // Store the struct definition
-        self.struct_types.insert(name.to_string(), fields.to_vec());
-        
-        // Calculate and store field offsets
         let mut offset = 0;
         let mut field_offsets = HashMap::new();
-        
+        let mut max_alignment = 1;
+
+        // First pass: calculate maximum alignment
+        for (_, field_type) in fields {
+            max_alignment = max_alignment.max(self.get_type_alignment(field_type)?);
+        }
+
+        // Second pass: calculate aligned offsets
         for (field_name, field_type) in fields {
-            // Align the offset based on the field type
             let alignment = self.get_type_alignment(field_type)?;
+            // Align the current offset
             offset = (offset + alignment - 1) & !(alignment - 1);
-            
             field_offsets.insert(field_name.clone(), offset);
             offset += self.get_type_size(field_type)?;
         }
-        
-        // Final struct size should be aligned to the maximum alignment of any field
-        let max_alignment = fields.iter()
-            .map(|(_, field_type)| self.get_type_alignment(field_type).unwrap_or(1))
-            .max()
-            .unwrap_or(1);
-        offset = (offset + max_alignment - 1) & !(max_alignment - 1);
-        
+
+        // Align the final size to the maximum alignment
+        let total_size = (offset + max_alignment - 1) & !(max_alignment - 1);
+
         // Store the layout
-        self.struct_layouts.insert(name.to_string(), StructLayout { field_offsets });
+        self.struct_layouts.insert(name.to_string(), StructLayout {
+            field_offsets,
+            total_size,
+        });
+
+        // Store the struct definition
+        self.struct_types.insert(name.to_string(), fields.to_vec());
         Ok(())
     }
 
     fn get_struct_size(&self, struct_name: &str) -> Result<usize> {
-        if let Some(fields) = self.struct_types.get(struct_name) {
-            let mut total_size = 0;
-            for (_, field_type) in fields {
-                total_size += self.get_type_size(field_type)?;
-            }
-            Ok(total_size)
+        if let Some(layout) = self.struct_layouts.get(struct_name) {
+            Ok(layout.total_size)
         } else {
             Err(anyhow::anyhow!("Undefined struct: {}", struct_name))
-        }
-    }
-
-    fn get_type_size(&self, ast_type: &AstType) -> Result<usize> {
-        match ast_type {
-            AstType::Int => Ok(8),  // 64-bit integer
-            AstType::Bool => Ok(1), // 8-bit boolean
-            AstType::Char => Ok(1), // 8-bit char
-            AstType::String => Ok(16), // Pointer (8) + length (8)
-            AstType::Pointer(_) => Ok(8), // 64-bit pointer
-            AstType::Struct(name) => self.get_struct_size(name),
-            AstType::Array(elem_type) => {
-                // For simplicity, we'll assume fixed-size arrays of 8 elements
-                Ok(self.get_type_size(elem_type)? * 8)
-            }
-            AstType::Void => Ok(0),
-            _ => Err(anyhow::anyhow!("Unsupported type for size calculation: {:?}", ast_type))
         }
     }
 
@@ -798,6 +812,109 @@ impl<'a> CodeGenerator<'a> {
             _ => Err(anyhow::anyhow!("Unsupported type for alignment calculation: {:?}", ast_type))
         }
     }
+
+    fn get_type_size(&self, ast_type: &AstType) -> Result<usize> {
+        match ast_type {
+            AstType::Int => Ok(8),
+            AstType::Bool => Ok(1),
+            AstType::Char => Ok(1),
+            AstType::String => Ok(16), // pointer (8) + length (8)
+            AstType::Pointer(_) => Ok(8),
+            AstType::Array(elem_type) => {
+                let elem_size = self.get_type_size(elem_type)?;
+                Ok(8 * elem_size) // Assuming fixed size arrays of 8 elements
+            }
+            AstType::Struct(name) => self.get_struct_size(name),
+            AstType::Void => Ok(0),
+            _ => Err(anyhow::anyhow!("Unsupported type for size calculation: {:?}", ast_type))
+        }
+    }
+
+    fn compile_string_literal(&mut self, s: &str, builder: &mut FunctionBuilder) -> Result<Value> {
+        let mut data = DataDescription::new();
+        
+        // Add null terminator for C strings
+        let mut string_data = s.as_bytes().to_vec();
+        string_data.push(0);
+        
+        data.define(string_data.into_boxed_slice());
+        
+        // Create a unique name for the string
+        let name = format!("str_{}", self.next_string_id());
+        
+        // Declare the data in the module
+        let data_id = self.module.declare_data(
+            &name,
+            Linkage::Local,
+            true,  // readonly
+            false, // not thread local
+        )?;
+        
+        // Define the data
+        self.module.define_data(data_id, &data)?;
+        
+        // Get a reference to the data in the function
+        let local_id = self.module.declare_data_in_func(data_id, builder.func);
+        
+        // Get the address of the string
+        Ok(builder.ins().symbol_value(types::I64, local_id))
+    }
+
+    fn next_string_id(&mut self) -> usize {
+        let id = self.string_counter;
+        self.string_counter += 1;
+        id
+    }
+
+    // Add this method
+    fn pointer_type(&self) -> Type {
+        types::I64 // Use 64-bit pointers
+    }
+
+    // Add a new method to handle variable indexing
+    fn compile_stmt_with_var_index(
+        &mut self,
+        stmt: &Stmt,
+        builder: &mut FunctionBuilder,
+        loop_stack: &mut Vec<LoopContext>,
+        var_index: &mut usize,
+    ) -> Result<()> {
+        match stmt {
+            Stmt::VarDecl { name, var_type, init_expr } => {
+                let var = Variable::new(*var_index);
+                *var_index += 1;
+                
+                let cl_type = self.ast_type_to_cl_type(var_type)?;
+                builder.declare_var(var, cl_type);
+                
+                // Add to current scope before initializing
+                self.current_scope().variables.insert(name.clone(), var);
+                self.current_scope().variable_types.insert(name.clone(), var_type.clone());
+
+                if let Some(expr) = init_expr {
+                    let value = self.compile_expr(expr, Some(builder), loop_stack)?;
+                    builder.def_var(var, value);
+                } else {
+                    let zero = builder.ins().iconst(cl_type, 0);
+                    builder.def_var(var, zero);
+                }
+                Ok(())
+            }
+            Stmt::Block(stmts) => {
+                self.push_scope();
+                for stmt in stmts {
+                    self.compile_stmt_with_var_index(stmt, builder, loop_stack, var_index)?;
+                    if self.is_current_block_terminated(builder) {
+                        break;
+                    }
+                }
+                self.pop_scope();
+                Ok(())
+            }
+            // Handle other statement types by delegating to the original compile_stmt
+            _ => self.compile_stmt(stmt, builder, loop_stack),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -879,11 +996,11 @@ mod tests {
                     name: "x".to_string(),
                     var_type: AstType::Int,
                     init_expr: Some(Box::new(Expr::IntLiteral(10))),
-                },  
+                },
+                Stmt::Return(Box::new(Expr::Variable("x".to_string()))),
             ]);
 
             codegen.compile_program(&prog).expect("Compilation failed");
-
             func_id = codegen.get_function_id("main").unwrap();
         }
 
@@ -1315,15 +1432,15 @@ mod tests {
 
         // Define a struct
         let fields = vec![
-            ("x".to_string(), AstType::Int),
-            ("y".to_string(), AstType::Int),
-            ("valid".to_string(), AstType::Bool),
+            ("x".to_string(), AstType::Int),      // 8 bytes, offset 0
+            ("y".to_string(), AstType::Int),      // 8 bytes, offset 8
+            ("valid".to_string(), AstType::Bool), // 1 byte, offset 16, padded to 24
         ];
 
         assert!(codegen.compile_struct_def("Point", &fields).is_ok());
 
-        // Test struct size calculation
-        assert_eq!(codegen.get_struct_size("Point").unwrap(), 17); // 8 + 8 + 1
+        // Test struct size calculation (24 bytes due to alignment)
+        assert_eq!(codegen.get_struct_size("Point").unwrap(), 24);
 
         // Test field offset calculation
         assert_eq!(codegen.get_struct_field_offset("Point", "x").unwrap(), 0);
@@ -1609,6 +1726,86 @@ mod tests {
 
         let result: i64 = run_code(&mut module, func_id);
         assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn test_extern_function() {
+        let isa = cranelift_native::builder()
+            .unwrap()
+            .finish(settings::Flags::new(settings::builder()))
+            .unwrap();
+        let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        let mut module = JITModule::new(builder);
+
+        let mut codegen = CodeGenerator::new(&mut module);
+
+        // Declare an external function (e.g., puts from libc)
+        let func_decl = FuncDecl {
+            name: "puts".to_string(),
+            params: vec![("s".to_string(), AstType::Pointer(Box::new(AstType::Char)))],
+            return_type: AstType::Int,
+        };
+
+        // Compile the external declaration
+        assert!(codegen.compile_func_extern_decl(&func_decl).is_ok());
+
+        // Verify that the function ID was stored
+        assert!(codegen.get_function_id("puts").is_some());
+    }
+
+    #[test]
+    fn test_extern_function_call() {
+        let isa = cranelift_native::builder()
+            .unwrap()
+            .finish(settings::Flags::new(settings::builder()))
+            .unwrap();
+        let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        let mut module = JITModule::new(builder);
+
+        let mut codegen = CodeGenerator::new(&mut module);
+
+        // Create a program that declares and uses puts
+        let program = Program::new(vec![
+            // Declare the external function
+            Stmt::FuncExternDecl {
+                name: FuncDecl {
+                    name: "puts".to_string(),
+                    params: vec![("s".to_string(), AstType::Pointer(Box::new(AstType::Char)))],
+                    return_type: AstType::Int,
+                },
+                lib: "libc".to_string(),
+            },
+            // Define main function that calls puts
+            Stmt::FuncDef {
+                func_decl: FuncDecl {
+                    name: "main".to_string(),
+                    params: vec![],
+                    return_type: AstType::Int,
+                },
+                body: Box::new(Stmt::Block(vec![
+                    // Call puts with a string literal
+                    Stmt::ExprStmt(Box::new(Expr::FuncCall(
+                        "puts".to_string(),
+                        vec![Expr::StringLiteral("Hello from external function!".to_string())],
+                    ))),
+                    // Return 0
+                    Stmt::Return(Box::new(Expr::IntLiteral(0))),
+                ])),
+            },
+        ]);
+
+        // Compile the program and print any error
+        match codegen.compile_program(&program) {
+            Ok(_) => (),
+            Err(e) => panic!("Failed to compile program: {}", e),
+        }
+
+        // Get the main function ID
+        let func_id = codegen.get_function_id("main").unwrap();
+
+        // Run the code
+        let result: i64 = run_code(&mut module, func_id);
+        assert_eq!(result, 0);
     }
 }
 
