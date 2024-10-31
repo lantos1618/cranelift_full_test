@@ -125,8 +125,6 @@ impl Parser {
 
     fn parse_primary(&mut self) -> Result<Expr, CompilerError> {
         let mut expr = match self.tokens.next().map(|t| t.kind) {
-            Some(TokenKind::IntLiteral(value)) => Ok(Expr::IntLiteral(value.into())),
-            Some(TokenKind::BoolLiteral(value)) => Ok(Expr::BoolLiteral(value)),
             Some(TokenKind::Identifier(name)) => {
                 // Check if this is a function call or struct initialization
                 if let Some(token) = self.tokens.peek() {
@@ -148,46 +146,22 @@ impl Parser {
                                 }
                             }
                             
-                            Ok(Expr::FuncCall(name.to_string(), args))
+                            Expr::FuncCall(name.to_string(), args)
                         }
                         TokenKind::OpenBrace => {
                             self.tokens.next(); // consume {
-                            let mut fields = Vec::new();
-                            
-                            while let Some(token) = self.tokens.peek() {
-                                if token.kind == TokenKind::CloseBrace {
-                                    self.tokens.next(); // consume }
-                                    break;
-                                }
-                                
-                                let field_name = if let Some(Token { kind: TokenKind::Identifier(name), .. }) = self.tokens.next() {
-                                    name
-                                } else {
-                                    return Err(self.error("Expected field name"));
-                                };
-                                
-                                self.expect_token(&TokenKind::Colon)?;
-                                let field_value = self.parse_expression()?;
-                                fields.push((field_name, field_value));
-                                
-                                if let Some(Token { kind: TokenKind::Comma, .. }) = self.tokens.peek() {
-                                    self.tokens.next(); // consume comma
-                                }
-                            }
-                            
-                            Ok(Expr::StructInit {
-                                struct_name: name,
-                                fields,
-                            })
+                            self.parse_struct_init(name)?
                         }
-                        _ => Ok(Expr::Variable(name)),
+                        _ => Expr::Variable(name),
                     }
                 } else {
-                    Ok(Expr::Variable(name))
+                    Expr::Variable(name)
                 }
             }
-            _ => Err(self.error("Unexpected token")),
-        }?;
+            Some(TokenKind::IntLiteral(value)) => Expr::IntLiteral(value.into()),
+            Some(TokenKind::BoolLiteral(value)) => Expr::BoolLiteral(value),
+            _ => return Err(self.error("Unexpected token")),
+        };
 
         // Handle field access with dot operator
         while let Some(Token { kind: TokenKind::Dot, .. }) = self.tokens.peek() {
@@ -704,18 +678,21 @@ mod tests {
     #[test]
     fn test_parse_struct_missing_colon() {
         let tokens = vec![
-            Token::new(TokenKind::Identifier("Point".to_string()), 1, 1, "Point".to_string()),
-            Token::new(TokenKind::Equal, 1, 2, "=".to_string()),
-            Token::new(TokenKind::OpenBrace, 1, 3, "{".to_string()),
-            Token::new(TokenKind::Identifier("x".to_string()), 1, 4, "x".to_string()),
-            Token::new(TokenKind::Identifier("int".to_string()), 1, 5, "int".to_string()),
-            Token::new(TokenKind::CloseBrace, 1, 6, "}".to_string()),
+            Token::new(TokenKind::Struct, 1, 1, "struct".to_string()),
+            Token::new(TokenKind::Identifier("Point".to_string()), 1, 7, "Point".to_string()),
+            Token::new(TokenKind::OpenBrace, 1, 13, "{".to_string()),
+            Token::new(TokenKind::Identifier("x".to_string()), 1, 14, "x".to_string()),
+            Token::new(TokenKind::Identifier("int".to_string()), 1, 16, "int".to_string()),
+            Token::new(TokenKind::CloseBrace, 1, 20, "}".to_string()),
+            Token::new(TokenKind::Semicolon, 1, 21, ";".to_string()),
         ];
 
-        let mut parser = Parser::new(tokens, "".to_string());
-        let result = parser.parse_struct_definition("Point".to_string());
+        let mut parser = Parser::new(tokens, "struct Point { x int }".to_string());
+        let result = parser.parse_statement();
+        
         assert!(result.is_err());
-        assert!(result.unwrap_err().message.contains("Expected : after field name"));
+        let err = result.unwrap_err();
+        assert_eq!(err.message, "Expected : after field name");
     }
 
     #[test]
@@ -747,16 +724,17 @@ mod tests {
             Token::new(TokenKind::Colon, 1, 6, ":".to_string()),
             Token::new(TokenKind::Identifier("Point".to_string()), 1, 8, "Point".to_string()),
             Token::new(TokenKind::Equal, 1, 14, "=".to_string()),
-            Token::new(TokenKind::OpenBrace, 1, 16, "{".to_string()),
-            Token::new(TokenKind::Identifier("x".to_string()), 1, 17, "x".to_string()),
-            Token::new(TokenKind::Colon, 1, 18, ":".to_string()),
-            Token::new(TokenKind::IntLiteral(3), 1, 20, "3".to_string()),
-            Token::new(TokenKind::Comma, 1, 21, ",".to_string()),
-            Token::new(TokenKind::Identifier("y".to_string()), 1, 23, "y".to_string()),
-            Token::new(TokenKind::Colon, 1, 24, ":".to_string()),
-            Token::new(TokenKind::IntLiteral(4), 1, 26, "4".to_string()),
-            Token::new(TokenKind::CloseBrace, 1, 27, "}".to_string()),
-            Token::new(TokenKind::Semicolon, 1, 28, ";".to_string()),
+            Token::new(TokenKind::Identifier("Point".to_string()), 1, 16, "Point".to_string()),
+            Token::new(TokenKind::OpenBrace, 1, 21, "{".to_string()),
+            Token::new(TokenKind::Identifier("x".to_string()), 1, 22, "x".to_string()),
+            Token::new(TokenKind::Colon, 1, 23, ":".to_string()),
+            Token::new(TokenKind::IntLiteral(3), 1, 25, "3".to_string()),
+            Token::new(TokenKind::Comma, 1, 26, ",".to_string()),
+            Token::new(TokenKind::Identifier("y".to_string()), 1, 28, "y".to_string()),
+            Token::new(TokenKind::Colon, 1, 29, ":".to_string()),
+            Token::new(TokenKind::IntLiteral(4), 1, 31, "4".to_string()),
+            Token::new(TokenKind::CloseBrace, 1, 32, "}".to_string()),
+            Token::new(TokenKind::Semicolon, 1, 33, ";".to_string()),
         ];
         let mut parser = Parser::new(tokens, "".to_string());
         let stmt = parser.parse_statement().unwrap();
@@ -854,27 +832,55 @@ mod tests {
             Token::new(TokenKind::Identifier("int".to_string()), 3, 8, "int".to_string()),
             Token::new(TokenKind::CloseBrace, 4, 1, "}".to_string()),
             Token::new(TokenKind::Semicolon, 4, 2, ";".to_string()),
-            // Expression statement
+            // Variable declaration with struct initialization
             Token::new(TokenKind::Let, 5, 1, "let".to_string()),
             Token::new(TokenKind::Identifier("p".to_string()), 5, 5, "p".to_string()),
             Token::new(TokenKind::Colon, 5, 6, ":".to_string()),
             Token::new(TokenKind::Identifier("Point".to_string()), 5, 8, "Point".to_string()),
             Token::new(TokenKind::Equal, 5, 14, "=".to_string()),
-            Token::new(TokenKind::OpenBrace, 5, 16, "{".to_string()),
-            Token::new(TokenKind::Identifier("x".to_string()), 5, 17, "x".to_string()),
-            Token::new(TokenKind::Colon, 5, 18, ":".to_string()),
-            Token::new(TokenKind::IntLiteral(1), 5, 20, "1".to_string()),
-            Token::new(TokenKind::Comma, 5, 21, ",".to_string()),
-            Token::new(TokenKind::Identifier("y".to_string()), 5, 23, "y".to_string()),
-            Token::new(TokenKind::Colon, 5, 24, ":".to_string()),
-            Token::new(TokenKind::IntLiteral(2), 5, 26, "2".to_string()),
-            Token::new(TokenKind::CloseBrace, 5, 27, "}".to_string()),
-            Token::new(TokenKind::Semicolon, 5, 28, ";".to_string()),
+            Token::new(TokenKind::Identifier("Point".to_string()), 5, 16, "Point".to_string()),
+            Token::new(TokenKind::OpenBrace, 5, 21, "{".to_string()),
+            Token::new(TokenKind::Identifier("x".to_string()), 5, 22, "x".to_string()),
+            Token::new(TokenKind::Colon, 5, 23, ":".to_string()),
+            Token::new(TokenKind::IntLiteral(1), 5, 25, "1".to_string()),
+            Token::new(TokenKind::Comma, 5, 26, ",".to_string()),
+            Token::new(TokenKind::Identifier("y".to_string()), 5, 28, "y".to_string()),
+            Token::new(TokenKind::Colon, 5, 29, ":".to_string()),
+            Token::new(TokenKind::IntLiteral(2), 5, 31, "2".to_string()),
+            Token::new(TokenKind::CloseBrace, 5, 32, "}".to_string()),
+            Token::new(TokenKind::Semicolon, 5, 33, ";".to_string()),
         ];
 
         let mut parser = Parser::new(tokens, "test source".to_string());
         let program = parser.parse().unwrap();
-
+        
         assert_eq!(program.statements.len(), 2);
+        
+        match &program.statements[0] {
+            Stmt::StructDef { name, fields } => {
+                assert_eq!(name, "Point");
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].0, "x");
+                assert_eq!(fields[1].0, "y");
+            }
+            _ => panic!("Expected struct definition"),
+        }
+        
+        match &program.statements[1] {
+            Stmt::VarDecl { name, var_type, init_expr } => {
+                assert_eq!(name, "p");
+                assert_eq!(var_type, &AstType::Struct("Point".to_string()));
+                match init_expr.as_ref().unwrap().as_ref() {
+                    Expr::StructInit { struct_name, fields } => {
+                        assert_eq!(struct_name, "Point");
+                        assert_eq!(fields.len(), 2);
+                        assert_eq!(fields[0].0, "x");
+                        assert_eq!(fields[1].0, "y");
+                    }
+                    _ => panic!("Expected struct initialization"),
+                }
+            }
+            _ => panic!("Expected variable declaration"),
+        }
     }
 }

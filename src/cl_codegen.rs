@@ -227,7 +227,7 @@ impl<'a> CodeGenerator<'a> {
         builder: &mut FunctionBuilder,
         loop_stack: &mut Vec<LoopContext>,
     ) -> Result<()> {
-        if let Some(&var) = self.current_scope().variables.get(name) {
+        if let Some(var) = self.get_variable(name) {
             let value = self.compile_expr(expr, Some(builder), loop_stack)?;
             builder.def_var(var, value);
             Ok(())
@@ -329,7 +329,7 @@ impl<'a> CodeGenerator<'a> {
                     Ok(builder.ins().iconst(types::I8, bool_value))
                 }
                 Expr::Variable(name) => {
-                    if let Some(&var) = self.current_scope().variables.get(name) {
+                    if let Some(var) = self.get_variable(name) {
                         Ok(builder.use_var(var))
                     } else {
                         Err(anyhow::anyhow!("Undefined variable `{}`", name))
@@ -426,7 +426,7 @@ impl<'a> CodeGenerator<'a> {
                 },
                 Expr::StructAccess(struct_expr, field_name) => {
                     let struct_val = self.compile_expr(struct_expr, Some(builder), loop_stack)?;
-                    let struct_type = self.get_expr_type(struct_expr, builder)?;
+                    let struct_type = self.get_expr_type(struct_expr)?;
                     
                     match struct_type {
                         AstType::Struct(struct_name) => {
@@ -673,16 +673,19 @@ impl<'a> CodeGenerator<'a> {
         }
     }
 
-    fn get_variable_type(&mut self, name: &str, _builder: &FunctionBuilder) -> Result<AstType> {
-        self.current_scope().variable_types.get(name)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("Type not found for variable {}", name))
+    fn get_variable_type(&self, name: &str) -> Result<AstType> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(var_type) = scope.variable_types.get(name) {
+                return Ok(var_type.clone());
+            }
+        }
+        Err(anyhow::anyhow!("Type not found for variable {}", name))
     }
 
-    fn get_field_type(&mut self, struct_expr: &Box<Expr>, field_name: &str, builder: &FunctionBuilder) -> Result<AstType> {
+    fn get_field_type(&mut self, struct_expr: &Box<Expr>, field_name: &str) -> Result<AstType> {
         match &**struct_expr {
             Expr::Variable(var_name) => {
-                if let AstType::Struct(struct_name) = &self.get_variable_type(var_name, builder)? {
+                if let AstType::Struct(struct_name) = &self.get_variable_type(var_name)? {
                     if let Some(fields) = self.struct_types.get(struct_name) {
                         if let Some((_, field_type)) = fields.iter().find(|(name, _)| name == field_name) {
                             Ok(field_type.clone())
@@ -698,7 +701,7 @@ impl<'a> CodeGenerator<'a> {
             }
             Expr::StructAccess(inner_struct, inner_field) => {
                 // Recursively get the type for nested access
-                let inner_type = self.get_field_type(inner_struct, inner_field, builder)?;
+                let inner_type = self.get_field_type(inner_struct, inner_field)?;
                 if let AstType::Struct(struct_name) = inner_type {
                     if let Some(fields) = self.struct_types.get(&struct_name) {
                         if let Some((_, field_type)) = fields.iter().find(|(name, _)| name == field_name) {
@@ -717,17 +720,16 @@ impl<'a> CodeGenerator<'a> {
         }
     }
 
-    fn get_expr_type(&mut self, expr: &Expr, builder: &FunctionBuilder) -> Result<AstType> {
+    fn get_expr_type(&mut self, expr: &Expr) -> Result<AstType> {
         match expr {
             Expr::IntLiteral(_) => Ok(AstType::Int),
             Expr::BoolLiteral(_) => Ok(AstType::Bool),
             Expr::StringLiteral(_) => Ok(AstType::String),
             Expr::CharLiteral(_) => Ok(AstType::Char),
-            Expr::Variable(name) => self.get_variable_type(name, builder),
+            Expr::Variable(name) => self.get_variable_type(name),
             Expr::StructAccess(struct_expr, field_name) => {
-                self.get_field_type(struct_expr, field_name, builder)
+                self.get_field_type(struct_expr, field_name)
             }
-            // Add other expression types as needed
             _ => Err(anyhow::anyhow!("Type inference not implemented for this expression")),
         }
     }
@@ -747,6 +749,7 @@ impl<'a> CodeGenerator<'a> {
 
     // Update variable lookup to check all scopes from innermost to outermost
     fn get_variable(&self, name: &str) -> Option<Variable> {
+        // Search through all scopes from innermost to outermost
         for scope in self.scopes.iter().rev() {
             if let Some(&var) = scope.variables.get(name) {
                 return Some(var);
@@ -968,7 +971,7 @@ mod tests {
                     Stmt::Return(Box::new(Expr::BinaryOp(
                         Box::new(Expr::Variable("x".to_string())),
                         BinOp::Add,
-                        Box::new(Expr::Variable("y".to_string())),
+                        Box::new(Expr::Variable("y".to_string()))
                     ))),
                 ])),
             },
@@ -983,14 +986,13 @@ mod tests {
                         "add".to_string(),
                         vec![
                             Expr::IntLiteral(1),
-                            Expr::IntLiteral(2),
-                        ],
-                    ))),
+                            Expr::IntLiteral(2)
+                        ]
+                    )))
                 ])),
-            },
+            }
         ]);
 
-           
         let isa = cranelift_native::builder()
             .unwrap()
             .finish(settings::Flags::new(settings::builder()))
@@ -1000,8 +1002,6 @@ mod tests {
 
         let mut codegen = CodeGenerator::new(&mut module);
         let result = codegen.compile_program(&program);
-
-
 
         assert!(result.is_ok());
     }
@@ -1085,7 +1085,6 @@ mod tests {
 
         let mut codegen = CodeGenerator::new(&mut module);
         let result = codegen.compile_program(&program);
-
 
         assert!(result.is_ok());
     }
