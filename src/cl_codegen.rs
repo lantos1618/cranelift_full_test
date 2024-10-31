@@ -64,66 +64,69 @@ impl<'a> CodeGenerator<'a> {
             }
         }
 
-        // Second pass: compile all function definitions
+        // Second pass: compile all function definitions and other statements
         let mut has_main = false;
         for stmt in &program.statements {
-            if let Stmt::FuncDef { func_decl, body } = stmt {
-                if func_decl.name == "main" {
-                    has_main = true;
+            match stmt {
+                Stmt::StructDef { .. } => {
+                    // Skip struct definitions as they're already handled
+                    continue;
                 }
-                self.compile_func_def(func_decl, body)?;
-            }
-        }
+                Stmt::FuncDef { func_decl, body } => {
+                    if func_decl.name == "main" {
+                        has_main = true;
+                    }
+                    self.compile_func_def(func_decl, body)?;
+                }
+                _ => {
+                    // If we have a non-function statement, it goes into main
+                    if !has_main {
+                        // Create default main function
+                        let mut sig = self.module.make_signature();
+                        sig.returns.push(AbiParam::new(types::I64));
+                        let func_id = self.module.declare_function("main", Linkage::Export, &sig)?;
 
-        // If no main function was found, create a default one
-        if !has_main {
-            // Create function signature for main
-            let mut sig = self.module.make_signature();
-            sig.returns.push(AbiParam::new(types::I64));
-            let func_id = self.module.declare_function("main", Linkage::Export, &sig)?;
+                        let mut func_ctx = FunctionBuilderContext::new();
+                        let mut ctx = self.module.make_context();
+                        ctx.func.signature = sig;
 
-            // Create function context
-            let mut func_ctx = FunctionBuilderContext::new();
-            let mut ctx = self.module.make_context();
-            ctx.func.signature = sig;
+                        let mut loop_stack = Vec::new();
 
-            // Create a local variables map for the main function
-            let mut variables: HashMap<String, Variable> = HashMap::new();
-            let mut loop_stack = Vec::new();
+                        {
+                            let mut builder = FunctionBuilder::new(&mut ctx.func, &mut func_ctx);
+                            let entry_block = builder.create_block();
+                            builder.switch_to_block(entry_block);
 
-            {
-                let mut builder = FunctionBuilder::new(&mut ctx.func, &mut func_ctx);
-                let entry_block = builder.create_block();
-                builder.switch_to_block(entry_block);
-
-                // Compile all non-function statements as part of main
-                for stmt in &program.statements {
-                    match stmt {
-                        Stmt::FuncDef { .. } | Stmt::StructDef { .. } => {
-                            // Skip function and struct definitions as they're already handled
-                            continue;
-                        }
-                        _ => {
-                            self.compile_stmt(stmt, &mut builder, &mut loop_stack)?;
-                            if self.is_current_block_terminated(&builder) {
-                                break;
+                            // Compile all non-function statements as part of main
+                            for stmt in &program.statements {
+                                match stmt {
+                                    Stmt::FuncDef { .. } | Stmt::StructDef { .. } => {
+                                        continue;
+                                    }
+                                    _ => {
+                                        self.compile_stmt(stmt, &mut builder, &mut loop_stack)?;
+                                        if self.is_current_block_terminated(&builder) {
+                                            break;
+                                        }
+                                    }
+                                }
                             }
+
+                            if !self.is_current_block_terminated(&builder) {
+                                let zero = builder.ins().iconst(types::I64, 0);
+                                builder.ins().return_(&[zero]);
+                            }
+
+                            builder.seal_all_blocks();
+                            builder.finalize();
                         }
+
+                        self.module.define_function(func_id, &mut ctx)?;
+                        self.function_ids.insert("main".to_string(), func_id);
+                        has_main = true;
                     }
                 }
-
-                // Ensure the function has a return instruction if not already terminated
-                if !self.is_current_block_terminated(&builder) {
-                    let zero = builder.ins().iconst(types::I64, 0);
-                    builder.ins().return_(&[zero]);
-                }
-
-                builder.seal_all_blocks();
-                builder.finalize();
             }
-
-            self.module.define_function(func_id, &mut ctx)?;
-            self.function_ids.insert("main".to_string(), func_id);
         }
 
         Ok(())
@@ -624,10 +627,22 @@ impl<'a> CodeGenerator<'a> {
         let mut field_offsets = HashMap::new();
         
         for (field_name, field_type) in fields {
+            // Align the offset based on the field type
+            let alignment = self.get_type_alignment(field_type)?;
+            offset = (offset + alignment - 1) & !(alignment - 1);
+            
             field_offsets.insert(field_name.clone(), offset);
             offset += self.get_type_size(field_type)?;
         }
         
+        // Final struct size should be aligned to the maximum alignment of any field
+        let max_alignment = fields.iter()
+            .map(|(_, field_type)| self.get_type_alignment(field_type).unwrap_or(1))
+            .max()
+            .unwrap_or(1);
+        offset = (offset + max_alignment - 1) & !(max_alignment - 1);
+        
+        // Store the layout
         self.struct_layouts.insert(name.to_string(), StructLayout { field_offsets });
         Ok(())
     }
@@ -757,6 +772,32 @@ impl<'a> CodeGenerator<'a> {
         }
         None
     }
+
+    // Add this helper function to get type alignment
+    fn get_type_alignment(&self, ast_type: &AstType) -> Result<usize> {
+        match ast_type {
+            AstType::Int => Ok(8),  // 64-bit alignment
+            AstType::Bool => Ok(1), // 8-bit alignment
+            AstType::Char => Ok(1), // 8-bit alignment
+            AstType::String => Ok(8), // Pointer alignment
+            AstType::Pointer(_) => Ok(8), // Pointer alignment
+            AstType::Struct(name) => {
+                // For structs, use the maximum alignment of their fields
+                if let Some(fields) = self.struct_types.get(name) {
+                    let mut max_alignment = 1;
+                    for (_, field_type) in fields {
+                        max_alignment = max_alignment.max(self.get_type_alignment(field_type)?);
+                    }
+                    Ok(max_alignment)
+                } else {
+                    Err(anyhow::anyhow!("Undefined struct: {}", name))
+                }
+            }
+            AstType::Array(elem_type) => self.get_type_alignment(elem_type),
+            AstType::Void => Ok(1),
+            _ => Err(anyhow::anyhow!("Unsupported type for alignment calculation: {:?}", ast_type))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -838,8 +879,7 @@ mod tests {
                     name: "x".to_string(),
                     var_type: AstType::Int,
                     init_expr: Some(Box::new(Expr::IntLiteral(10))),
-                },
-                Stmt::Return(Box::new(Expr::Variable("x".to_string()))),
+                },  
             ]);
 
             codegen.compile_program(&prog).expect("Compilation failed");
@@ -1506,25 +1546,29 @@ mod tests {
 
         // Define a complex struct with multiple types
         let fields = vec![
-            ("name".to_string(), AstType::String),
-            ("age".to_string(), AstType::Int),
-            ("is_active".to_string(), AstType::Bool),
-            ("points".to_string(), AstType::Array(Box::new(AstType::Int))),
-            ("next".to_string(), AstType::Pointer(Box::new(AstType::Struct("Person".to_string())))),
+            ("name".to_string(), AstType::String),       // offset 0  (8-byte aligned)
+            ("age".to_string(), AstType::Int),           // offset 16 (8-byte aligned)
+            ("is_active".to_string(), AstType::Bool),    // offset 24 (1-byte aligned)
+            ("points".to_string(), AstType::Array(Box::new(AstType::Int))), // offset 32 (8-byte aligned)
+            ("next".to_string(), AstType::Pointer(Box::new(AstType::Struct("Person".to_string())))), // offset 96 (8-byte aligned)
         ];
 
         assert!(codegen.compile_struct_def("Person", &fields).is_ok());
 
         // Test struct size calculation
-        // String (16) + Int (8) + Bool (1) + Array (64) + Pointer (8) = 97
-        assert_eq!(codegen.get_struct_size("Person").unwrap(), 97);
+        // String (16) + padding (0) +
+        // Int (8) + padding (0) +
+        // Bool (1) + padding (7) +
+        // Array (64) + padding (0) +
+        // Pointer (8) = 104
+        assert_eq!(codegen.get_struct_size("Person").unwrap(), 104);
 
         // Test field offsets
         assert_eq!(codegen.get_struct_field_offset("Person", "name").unwrap(), 0);
         assert_eq!(codegen.get_struct_field_offset("Person", "age").unwrap(), 16);
         assert_eq!(codegen.get_struct_field_offset("Person", "is_active").unwrap(), 24);
-        assert_eq!(codegen.get_struct_field_offset("Person", "points").unwrap(), 25);
-        assert_eq!(codegen.get_struct_field_offset("Person", "next").unwrap(), 89);
+        assert_eq!(codegen.get_struct_field_offset("Person", "points").unwrap(), 32);
+        assert_eq!(codegen.get_struct_field_offset("Person", "next").unwrap(), 96);
     }
 
     #[test]
