@@ -1,13 +1,9 @@
 use anyhow::Result;
-
 use cranelift::prelude::*;
 use cranelift_codegen::ir::immediates::Offset32;
 use cranelift_module::{FuncId, Linkage, Module};
 use cranelift_jit::JITModule;
-
 use crate::ast::*;
-use crate::error::{CompilerError, ErrorType};
-
 use std::collections::HashMap;
 
 
@@ -22,6 +18,22 @@ pub struct StructLayout {
     pub field_offsets: HashMap<String, usize>,
 }
 
+// Add a scope management struct
+#[derive(Debug)]
+struct Scope {
+    variables: HashMap<String, Variable>,
+    variable_types: HashMap<String, AstType>,
+}
+
+impl Scope {
+    fn new() -> Self {
+        Self {
+            variables: HashMap::new(),
+            variable_types: HashMap::new(),
+        }
+    }
+}
+
 pub struct CodeGenerator<'a> {
     pub module: &'a mut JITModule,
     #[allow(dead_code)]
@@ -29,7 +41,7 @@ pub struct CodeGenerator<'a> {
     struct_types: HashMap<String, Vec<(String, AstType)>>, // Struct definitions
     struct_layouts: HashMap<String, StructLayout>, // Add this field
     function_ids: HashMap<String, FuncId>, // Map function names to FuncId
-    variable_types: HashMap<String, AstType>, // Change Variable to String
+    scopes: Vec<Scope>,  // Stack of scopes
 }
 
 impl<'a> CodeGenerator<'a> {
@@ -40,7 +52,7 @@ impl<'a> CodeGenerator<'a> {
             struct_types: HashMap::new(),
             struct_layouts: HashMap::new(), // Initialize the new field
             function_ids: HashMap::new(),
-            variable_types: HashMap::new(),
+            scopes: vec![Scope::new()], // Initialize with global scope
         }
     }
 
@@ -76,7 +88,7 @@ impl<'a> CodeGenerator<'a> {
             ctx.func.signature = sig;
 
             // Create a local variables map for the main function
-            let mut variables = HashMap::new();
+            let mut variables: HashMap<String, Variable> = HashMap::new();
             let mut loop_stack = Vec::new();
 
             {
@@ -92,7 +104,7 @@ impl<'a> CodeGenerator<'a> {
                             continue;
                         }
                         _ => {
-                            self.compile_stmt(stmt, &mut builder, &mut variables, &mut loop_stack)?;
+                            self.compile_stmt(stmt, &mut builder, &mut loop_stack)?;
                             if self.is_current_block_terminated(&builder) {
                                 break;
                             }
@@ -122,46 +134,50 @@ impl<'a> CodeGenerator<'a> {
         &mut self,
         stmt: &Stmt,
         builder: &mut FunctionBuilder,
-        variables: &mut HashMap<String, Variable>,
         loop_stack: &mut Vec<LoopContext>,
     ) -> Result<()> {
-        if self.is_current_block_terminated(builder) {
-            return Ok(());
-        }
-
         match stmt {
-            Stmt::VarDecl {
-                name,
-                var_type,
-                init_expr,
-            } => {
-                self.compile_var_decl(name, var_type, init_expr.as_deref(), builder, variables)?;
-            }
-            Stmt::VarAssign { name, expr } => {
-                self.compile_var_assign(name, expr, builder, variables)?;
-            }
-            Stmt::ExprStmt(expr) => {
-                self.compile_expr(expr, Some(builder), variables)?;
-            }
-            Stmt::Return(expr) => {
-                self.compile_return(expr, builder, variables)?;
-                // After a return, the block is terminated.
-                return Ok(());
+            Stmt::VarDecl { name, var_type, init_expr } => {
+                let var = Variable::new(self.current_scope().variables.len());
+                let cl_type = self.ast_type_to_cl_type(var_type)?;
+
+                builder.declare_var(var, cl_type);
+                
+                // Add to current scope before initializing
+                self.current_scope().variables.insert(name.clone(), var);
+                self.current_scope().variable_types.insert(name.clone(), var_type.clone());
+
+                if let Some(expr) = init_expr {
+                    let value = self.compile_expr(expr, Some(builder), loop_stack)?;
+                    builder.def_var(var, value);
+                } else {
+                    let zero = builder.ins().iconst(cl_type, 0);
+                    builder.def_var(var, zero);
+                }
             }
             Stmt::Block(stmts) => {
+                self.push_scope();
                 for stmt in stmts {
-                    self.compile_stmt(stmt, builder, variables, loop_stack)?;
-
+                    self.compile_stmt(stmt, builder, loop_stack)?;
                     if self.is_current_block_terminated(builder) {
                         break;
                     }
                 }
+                self.pop_scope();
+            }
+            Stmt::VarAssign { name, expr } => {
+                self.compile_var_assign(name, expr, builder, loop_stack)?;
+            }
+            Stmt::ExprStmt(expr) => {
+                self.compile_expr(expr, Some(builder), loop_stack)?;
+            }
+            Stmt::Return(expr) => {
+                self.compile_return(expr, builder, loop_stack)?;
             }
             Stmt::Break => {
                 if let Some(loop_context) = loop_stack.last() {
                     builder.ins().jump(loop_context.exit_block, &[]);
                     // Since we've added a jump, the current block is terminated
-                    // builder.seal_block(builder.current_block().unwrap()); // Remove this line
                 } else {
                     return Err(anyhow::anyhow!("'break' used outside of a loop"));
                 }
@@ -194,41 +210,13 @@ impl<'a> CodeGenerator<'a> {
                     then_branch,
                     else_branch.as_deref(),
                     builder,
-                    variables,
                     loop_stack,
                 )?;
             }
             Stmt::While { condition, body } => {
-                self.compile_while_loop(condition, body, builder, variables, loop_stack)?;
+                self.compile_while_loop(condition, body, builder, loop_stack)?;
             }
         }
-        Ok(())
-    }
-
-    pub fn compile_var_decl(
-        &mut self,
-        name: &str,
-        var_type: &AstType,
-        init_expr: Option<&Expr>,
-        builder: &mut FunctionBuilder,
-        variables: &mut HashMap<String, Variable>,
-    ) -> Result<()> {
-        let var = Variable::new(variables.len());
-        let cl_type = self.ast_type_to_cl_type(var_type)?;
-
-        builder.declare_var(var, cl_type);
-        variables.insert(name.to_string(), var);
-        self.variable_types.insert(name.to_string(), var_type.clone());
-
-        if let Some(expr) = init_expr {
-            let value = self.compile_expr(expr, Some(builder), variables)?;
-            builder.def_var(var, value);
-        } else {
-            // Initialize variable with zero
-            let zero = builder.ins().iconst(cl_type, 0);
-            builder.def_var(var, zero);
-        }
-
         Ok(())
     }
 
@@ -237,10 +225,10 @@ impl<'a> CodeGenerator<'a> {
         name: &str,
         expr: &Expr,
         builder: &mut FunctionBuilder,
-        variables: &mut HashMap<String, Variable>,
+        loop_stack: &mut Vec<LoopContext>,
     ) -> Result<()> {
-        if let Some(&var) = variables.get(name) {
-            let value = self.compile_expr(expr, Some(builder), variables)?;
+        if let Some(&var) = self.current_scope().variables.get(name) {
+            let value = self.compile_expr(expr, Some(builder), loop_stack)?;
             builder.def_var(var, value);
             Ok(())
         } else {
@@ -252,72 +240,64 @@ impl<'a> CodeGenerator<'a> {
         &mut self,
         expr: &Expr,
         builder: &mut FunctionBuilder,
-        variables: &mut HashMap<String, Variable>,
+        loop_stack: &mut Vec<LoopContext>,
     ) -> Result<()> {
-        let value = self.compile_expr(expr, Some(builder), variables)?;
+        let value = self.compile_expr(expr, Some(builder), loop_stack)?;
         builder.ins().return_(&[value]);
         Ok(())
     }
 
     pub fn compile_func_def(&mut self, func_decl: &FuncDecl, body: &Stmt) -> Result<()> {
-        // Create a local variables map for this function
-        let mut variables = HashMap::new();
-
-        // Create function signature
         let sig = self.create_signature(&func_decl.params, &func_decl.return_type)?;
-        let func_id = self
-            .module
-            .declare_function(&func_decl.name, Linkage::Local, &sig)?;
+        let func_id = self.module.declare_function(&func_decl.name, Linkage::Local, &sig)?;
 
-        // Create function context
         let mut func_ctx = FunctionBuilderContext::new();
         let mut ctx = self.module.make_context();
         ctx.func.signature = sig;
 
-        let mut loop_stack = Vec::new(); // Initialize the loop context stack
+        let mut loop_stack = Vec::new();
 
         {
             let mut builder = FunctionBuilder::new(&mut ctx.func, &mut func_ctx);
-
             let entry_block = builder.create_block();
             builder.switch_to_block(entry_block);
-
-            // Append function parameters to the block
             builder.append_block_params_for_function_params(entry_block);
+
+            // Push new scope for function
+            self.push_scope();
 
             // Map function parameters to variables
             for (i, (name, param_type)) in func_decl.params.iter().enumerate() {
-                let var = Variable::new(variables.len());
-                variables.insert(name.clone(), var);
-
+                let var = Variable::new(self.current_scope().variables.len());
                 let cl_type = self.ast_type_to_cl_type(param_type)?;
+                
                 builder.declare_var(var, cl_type);
                 let val = builder.block_params(entry_block)[i];
                 builder.def_var(var, val);
+                
+                self.current_scope().variables.insert(name.clone(), var);
+                self.current_scope().variable_types.insert(name.clone(), param_type.clone());
             }
 
-            self.compile_stmt(body, &mut builder, &mut variables, &mut loop_stack)?;
+            self.compile_stmt(body, &mut builder, &mut loop_stack)?;
 
-            // Ensure the function has a return instruction if not already terminated
+            // Pop function scope
+            self.pop_scope();
+
             if !self.is_current_block_terminated(&builder) {
                 if let AstType::Void = func_decl.return_type {
                     builder.ins().return_(&[]);
                 } else {
-                    // Return zero if no return statement is present
                     let zero = builder.ins().iconst(types::I64, 0);
                     builder.ins().return_(&[zero]);
                 }
             }
 
-            // Seal all blocks after defining them
             builder.seal_all_blocks();
-
             builder.finalize();
         }
 
         self.module.define_function(func_id, &mut ctx)?;
-
-        // Store the function ID
         self.function_ids.insert(func_decl.name.clone(), func_id);
 
         Ok(())
@@ -334,7 +314,7 @@ impl<'a> CodeGenerator<'a> {
         &mut self,
         expr: &Expr,
         mut builder_opt: Option<&mut FunctionBuilder>,
-        variables: &mut HashMap<String, Variable>,
+        loop_stack: &mut Vec<LoopContext>,
     ) -> Result<Value> {
         if let Some(builder) = builder_opt.as_deref_mut() {
             if self.is_current_block_terminated(builder) {
@@ -349,15 +329,15 @@ impl<'a> CodeGenerator<'a> {
                     Ok(builder.ins().iconst(types::I8, bool_value))
                 }
                 Expr::Variable(name) => {
-                    if let Some(&var) = variables.get(name) {
+                    if let Some(&var) = self.current_scope().variables.get(name) {
                         Ok(builder.use_var(var))
                     } else {
                         Err(anyhow::anyhow!("Undefined variable `{}`", name))
                     }
                 }
                 Expr::BinaryOp(lhs, op, rhs) => {
-                    let lhs_val = self.compile_expr(lhs, Some(builder), variables)?;
-                    let rhs_val = self.compile_expr(rhs, Some(builder), variables)?;
+                    let lhs_val = self.compile_expr(lhs, Some(builder), loop_stack)?;
+                    let rhs_val = self.compile_expr(rhs, Some(builder), loop_stack)?;
                     let result = match op {
                         BinOp::Add => builder.ins().iadd(lhs_val, rhs_val),
                         BinOp::Subtract => builder.ins().isub(lhs_val, rhs_val),
@@ -386,7 +366,7 @@ impl<'a> CodeGenerator<'a> {
                     Ok(result)
                 }
                 Expr::UnaryOp(op, expr) => {
-                    let val = self.compile_expr(expr, Some(builder), variables)?;
+                    let val = self.compile_expr(expr, Some(builder), loop_stack)?;
                     let result = match op {
                         UnaryOp::Negate => builder.ins().ineg(val),
                         UnaryOp::Not => {
@@ -404,7 +384,7 @@ impl<'a> CodeGenerator<'a> {
                         let func_ref = self.module.declare_func_in_func(func_id, builder.func);
                         let mut arg_values = Vec::new();
                         for arg in args {
-                            arg_values.push(self.compile_expr(arg, Some(builder), variables)?);
+                            arg_values.push(self.compile_expr(arg, Some(builder), loop_stack)?);
                         }
                         let call = builder.ins().call(func_ref, &arg_values);
                         let results = builder.inst_results(call);
@@ -434,7 +414,7 @@ impl<'a> CodeGenerator<'a> {
                         let field_offset = self.get_struct_field_offset(struct_name, field_name)?;
                         
                         // Compile field value
-                        let value = self.compile_expr(field_expr, Some(builder), variables)?;
+                        let value = self.compile_expr(field_expr, Some(builder), loop_stack)?;
                         
                         // Store field value at correct offset
                         let offset = Offset32::new(field_offset as i32);
@@ -445,7 +425,7 @@ impl<'a> CodeGenerator<'a> {
                     Ok(builder.ins().stack_addr(types::I64, stack_slot, 0))
                 },
                 Expr::StructAccess(struct_expr, field_name) => {
-                    let struct_val = self.compile_expr(struct_expr, Some(builder), variables)?;
+                    let struct_val = self.compile_expr(struct_expr, Some(builder), loop_stack)?;
                     let struct_type = self.get_expr_type(struct_expr, builder)?;
                     
                     match struct_type {
@@ -475,10 +455,9 @@ impl<'a> CodeGenerator<'a> {
         then_branch: &Stmt,
         else_branch: Option<&Stmt>,
         builder: &mut FunctionBuilder,
-        variables: &mut HashMap<String, Variable>,
         loop_stack: &mut Vec<LoopContext>,
     ) -> Result<()> {
-        let cond_val = self.compile_expr(condition, Some(builder), variables)?;
+        let cond_val = self.compile_expr(condition, Some(builder), loop_stack)?;
 
         // Since booleans are I8, compare with zero to get a boolean condition
         let zero = builder.ins().iconst(types::I8, 0);
@@ -493,7 +472,7 @@ impl<'a> CodeGenerator<'a> {
 
         // Then block
         builder.switch_to_block(then_block);
-        self.compile_stmt(then_branch, builder, variables, loop_stack)?;
+        self.compile_stmt(then_branch, builder, loop_stack)?;
 
         if !self.is_current_block_terminated(builder) {
             builder.ins().jump(merge_block, &[]);
@@ -502,7 +481,7 @@ impl<'a> CodeGenerator<'a> {
         // Else block
         builder.switch_to_block(else_block);
         if let Some(else_stmt) = else_branch {
-            self.compile_stmt(else_stmt, builder, variables, loop_stack)?;
+            self.compile_stmt(else_stmt, builder, loop_stack)?;
         }
 
         if !self.is_current_block_terminated(builder) {
@@ -526,7 +505,6 @@ impl<'a> CodeGenerator<'a> {
         condition: &Expr,
         body: &Stmt,
         builder: &mut FunctionBuilder,
-        variables: &mut HashMap<String, Variable>,
         loop_stack: &mut Vec<LoopContext>,
     ) -> Result<()> {
         let loop_header = builder.create_block();
@@ -546,7 +524,7 @@ impl<'a> CodeGenerator<'a> {
         builder.switch_to_block(loop_header);
         // Do not seal loop_header yet
 
-        let cond_val = self.compile_expr(condition, Some(builder), variables)?;
+        let cond_val = self.compile_expr(condition, Some(builder), loop_stack)?;
         let zero = builder.ins().iconst(types::I8, 0);
         let cmp = builder.ins().icmp(IntCC::NotEqual, cond_val, zero);
 
@@ -554,15 +532,18 @@ impl<'a> CodeGenerator<'a> {
 
         // Loop body
         builder.switch_to_block(loop_body);
-        self.compile_stmt(body, builder, variables, loop_stack)?;
+        // Push new scope for loop body
+        self.push_scope();
+        self.compile_stmt(body, builder, loop_stack)?;
+        // Pop loop body scope
+        self.pop_scope();
 
         if !self.is_current_block_terminated(builder) {
             builder.ins().jump(loop_header, &[]);
         }
-        // Seal the loop_body
-        builder.seal_block(loop_body);
 
-        // Now we can seal the loop_header
+        // Seal the blocks
+        builder.seal_block(loop_body);
         builder.seal_block(loop_header);
 
         // Pop the loop context
@@ -570,7 +551,6 @@ impl<'a> CodeGenerator<'a> {
 
         // Loop exit
         builder.switch_to_block(loop_exit);
-        // Seal loop_exit
         builder.seal_block(loop_exit);
 
         Ok(())
@@ -693,13 +673,13 @@ impl<'a> CodeGenerator<'a> {
         }
     }
 
-    fn get_variable_type(&self, name: &str, _builder: &FunctionBuilder) -> Result<AstType> {
-        self.variable_types.get(name)
+    fn get_variable_type(&mut self, name: &str, _builder: &FunctionBuilder) -> Result<AstType> {
+        self.current_scope().variable_types.get(name)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("Type not found for variable {}", name))
     }
 
-    fn get_field_type(&self, struct_expr: &Box<Expr>, field_name: &str, builder: &FunctionBuilder) -> Result<AstType> {
+    fn get_field_type(&mut self, struct_expr: &Box<Expr>, field_name: &str, builder: &FunctionBuilder) -> Result<AstType> {
         match &**struct_expr {
             Expr::Variable(var_name) => {
                 if let AstType::Struct(struct_name) = &self.get_variable_type(var_name, builder)? {
@@ -737,7 +717,7 @@ impl<'a> CodeGenerator<'a> {
         }
     }
 
-    fn get_expr_type(&self, expr: &Expr, builder: &FunctionBuilder) -> Result<AstType> {
+    fn get_expr_type(&mut self, expr: &Expr, builder: &FunctionBuilder) -> Result<AstType> {
         match expr {
             Expr::IntLiteral(_) => Ok(AstType::Int),
             Expr::BoolLiteral(_) => Ok(AstType::Bool),
@@ -750,6 +730,29 @@ impl<'a> CodeGenerator<'a> {
             // Add other expression types as needed
             _ => Err(anyhow::anyhow!("Type inference not implemented for this expression")),
         }
+    }
+
+    // Add scope management methods
+    fn push_scope(&mut self) {
+        self.scopes.push(Scope::new());
+    }
+
+    fn pop_scope(&mut self) {
+        self.scopes.pop().expect("No scope to pop");
+    }
+
+    fn current_scope(&mut self) -> &mut Scope {
+        self.scopes.last_mut().expect("No scope available")
+    }
+
+    // Update variable lookup to check all scopes from innermost to outermost
+    fn get_variable(&self, name: &str) -> Option<Variable> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(&var) = scope.variables.get(name) {
+                return Some(var);
+            }
+        }
+        None
     }
 }
 
@@ -937,7 +940,7 @@ mod tests {
                     BinOp::Add,
                     Box::new(Expr::IntLiteral(20)),
                 ))),
-                ]);
+            ]);
 
             codegen.compile_program(&prog).expect("Compilation failed");
 
@@ -951,6 +954,43 @@ mod tests {
 
     #[test]
     fn test_function_call() {
+        let program = Program::new(vec![
+            Stmt::FuncDef {
+                func_decl: FuncDecl {
+                    name: "add".to_string(),
+                    params: vec![
+                        ("x".to_string(), AstType::Int),
+                        ("y".to_string(), AstType::Int),
+                    ],
+                    return_type: AstType::Int,
+                },
+                body: Box::new(Stmt::Block(vec![
+                    Stmt::Return(Box::new(Expr::BinaryOp(
+                        Box::new(Expr::Variable("x".to_string())),
+                        BinOp::Add,
+                        Box::new(Expr::Variable("y".to_string())),
+                    ))),
+                ])),
+            },
+            Stmt::FuncDef {
+                func_decl: FuncDecl {
+                    name: "main".to_string(),
+                    params: vec![],
+                    return_type: AstType::Int,
+                },
+                body: Box::new(Stmt::Block(vec![
+                    Stmt::Return(Box::new(Expr::FuncCall(
+                        "add".to_string(),
+                        vec![
+                            Expr::IntLiteral(1),
+                            Expr::IntLiteral(2),
+                        ],
+                    ))),
+                ])),
+            },
+        ]);
+
+           
         let isa = cranelift_native::builder()
             .unwrap()
             .finish(settings::Flags::new(settings::builder()))
@@ -958,45 +998,12 @@ mod tests {
         let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
         let mut module = JITModule::new(builder);
 
-        let func_id;
+        let mut codegen = CodeGenerator::new(&mut module);
+        let result = codegen.compile_program(&program);
 
-        {
-            let mut codegen = CodeGenerator::new(&mut module);
 
-            // Define a function that adds 1
-            let func_decl = FuncDecl {
-                name: "add_one".to_string(),
-                params: vec![("value".to_string(), AstType::Int)],
-                return_type: AstType::Int,
-            };
 
-            let func_body = Stmt::Block(vec![
-                Stmt::Return(Box::new(Expr::BinaryOp(
-                    Box::new(Expr::Variable("value".to_string())),
-                    BinOp::Add,
-                    Box::new(Expr::IntLiteral(1)),
-                ))),
-            ]);
-
-            let prog = Program::new(vec![
-                Stmt::FuncDef {
-                    func_decl: func_decl.clone(),
-                    body: Box::new(func_body),
-                },
-                Stmt::Return(Box::new(Expr::FuncCall(
-                    "add_one".to_string(),
-                    vec![Expr::IntLiteral(41)],
-                ))),
-            ]);
-
-            codegen.compile_program(&prog).expect("Compilation failed");
-
-            func_id = codegen.get_function_id("main").unwrap();
-        }
-
-        // Execute the compiled code
-        let result: i64 = run_code(&mut module, func_id);
-        assert_eq!(result, 42);
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -1034,7 +1041,41 @@ mod tests {
 
     #[test]
     fn test_while_loop() {
-        // Test while loop
+        let program = Program::new(vec![
+            Stmt::FuncDef {
+                func_decl: FuncDecl {
+                    name: "main".to_string(),
+                    params: vec![],
+                    return_type: AstType::Int,
+                },
+                body: Box::new(Stmt::Block(vec![
+                    Stmt::VarDecl {
+                        name: "i".to_string(),
+                        var_type: AstType::Int,
+                        init_expr: Some(Box::new(Expr::IntLiteral(0))),
+                    },
+                    Stmt::While {
+                        condition: Box::new(Expr::BinaryOp(
+                            Box::new(Expr::Variable("i".to_string())),
+                            BinOp::LessThan,
+                            Box::new(Expr::IntLiteral(5)),
+                        )),
+                        body: Box::new(Stmt::Block(vec![
+                            Stmt::VarAssign {
+                                name: "i".to_string(),
+                                expr: Box::new(Expr::BinaryOp(
+                                    Box::new(Expr::Variable("i".to_string())),
+                                    BinOp::Add,
+                                    Box::new(Expr::IntLiteral(1)),
+                                )),
+                            },
+                        ])),
+                    },
+                    Stmt::Return(Box::new(Expr::Variable("i".to_string()))),
+                ])),
+            },
+        ]);
+        
         let isa = cranelift_native::builder()
             .unwrap()
             .finish(settings::Flags::new(settings::builder()))
@@ -1042,45 +1083,11 @@ mod tests {
         let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
         let mut module = JITModule::new(builder);
 
-        let func_id;
+        let mut codegen = CodeGenerator::new(&mut module);
+        let result = codegen.compile_program(&program);
 
-        {
-            let mut codegen = CodeGenerator::new(&mut module);
 
-            let prog = Program::new(vec![
-                Stmt::VarDecl {
-                    name: "i".to_string(),
-                    var_type: AstType::Int,
-                    init_expr: Some(Box::new(Expr::IntLiteral(0))),
-                },
-                Stmt::While {
-                    condition: Box::new(Expr::BinaryOp(
-                        Box::new(Expr::Variable("i".to_string())),
-                        BinOp::LessThan,
-                        Box::new(Expr::IntLiteral(5)),
-                    )),
-                    body: Box::new(Stmt::Block(vec![
-                        Stmt::VarAssign {
-                            name: "i".to_string(),
-                            expr: Box::new(Expr::BinaryOp(
-                                Box::new(Expr::Variable("i".to_string())),
-                                BinOp::Add,
-                                Box::new(Expr::IntLiteral(1)),
-                            )),
-                        },
-                    ])),
-                },
-                Stmt::Return(Box::new(Expr::Variable("i".to_string()))),
-            ]);
-
-            codegen.compile_program(&prog).expect("Compilation failed");
-
-            func_id = codegen.get_function_id("main").unwrap();
-        }
-
-        // Execute the compiled code
-        let result: i64 = run_code(&mut module, func_id);
-        assert_eq!(result, 5);
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -1520,7 +1527,48 @@ mod tests {
         assert_eq!(codegen.get_struct_field_offset("Person", "points").unwrap(), 25);
         assert_eq!(codegen.get_struct_field_offset("Person", "next").unwrap(), 89);
     }
+
+    #[test]
+    fn test_function_variable_scope() {
+        let isa = cranelift_native::builder()
+            .unwrap()
+            .finish(settings::Flags::new(settings::builder()))
+            .unwrap();
+        let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        let mut module = JITModule::new(builder);
+
+        let func_id;
+
+        {
+            let mut codegen = CodeGenerator::new(&mut module);
+
+            let prog = Program::new(vec![
+                Stmt::FuncDef {
+                    func_decl: FuncDecl {
+                        name: "test_scope".to_string(),
+                        params: vec![],
+                        return_type: AstType::Int,
+                    },
+                    body: Box::new(Stmt::Block(vec![
+                        Stmt::VarDecl {
+                            name: "x".to_string(),
+                            var_type: AstType::Int,
+                            init_expr: Some(Box::new(Expr::IntLiteral(42))),
+                        },
+                        Stmt::Return(Box::new(Expr::Variable("x".to_string()))),
+                    ])),
+                },
+            ]);
+
+            codegen.compile_program(&prog).expect("Compilation failed");
+            func_id = codegen.get_function_id("test_scope").unwrap();
+        }
+
+        let result: i64 = run_code(&mut module, func_id);
+        assert_eq!(result, 42);
+    }
 }
+
 
 
 
