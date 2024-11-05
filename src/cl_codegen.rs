@@ -1,11 +1,10 @@
+use crate::ast::*;
 use anyhow::Result;
 use cranelift::prelude::*;
 use cranelift_codegen::ir::immediates::Offset32;
-use cranelift_module::{FuncId, Linkage, Module, DataDescription};
 use cranelift_jit::JITModule;
-use crate::ast::*;
+use cranelift_module::{DataDescription, FuncId, Linkage, Module};
 use std::collections::HashMap;
-
 
 // Define LoopContext struct
 #[derive(Debug)]
@@ -33,6 +32,10 @@ impl Scope {
             variable_types: HashMap::new(),
         }
     }
+
+    fn next_var_index(&self) -> usize {
+        self.variables.len()
+    }
 }
 
 pub struct CodeGenerator<'a> {
@@ -40,10 +43,11 @@ pub struct CodeGenerator<'a> {
     #[allow(dead_code)]
     builder_context: FunctionBuilderContext,
     struct_types: HashMap<String, Vec<(String, AstType)>>, // Struct definitions
-    struct_layouts: HashMap<String, StructLayout>, // Add this field
-    function_ids: HashMap<String, FuncId>, // Map function names to FuncId
-    scopes: Vec<Scope>,  // Stack of scopes
-    string_counter: usize,  // Add this field
+    struct_layouts: HashMap<String, StructLayout>,         // Add this field
+    function_ids: HashMap<String, FuncId>,                 // Map function names to FuncId
+    scopes: Vec<Scope>,                                    // Stack of scopes
+    string_counter: usize,                                 // Add this field
+    var_counter: usize, // Add this field to track variable indices globally
 }
 
 impl<'a> CodeGenerator<'a> {
@@ -55,8 +59,16 @@ impl<'a> CodeGenerator<'a> {
             struct_layouts: HashMap::new(), // Initialize the new field
             function_ids: HashMap::new(),
             scopes: vec![Scope::new()], // Initialize with global scope
-            string_counter: 0,  // Initialize the counter
+            string_counter: 0,          // Initialize the counter
+            var_counter: 0,             // Initialize the counter
         }
+    }
+
+    // Add this helper method
+    fn next_var_index(&mut self) -> usize {
+        let index = self.var_counter;
+        self.var_counter += 1;
+        index
     }
 
     pub fn compile_program(&mut self, program: &Program) -> Result<()> {
@@ -97,7 +109,9 @@ impl<'a> CodeGenerator<'a> {
                         // Create default main function
                         let mut sig = self.module.make_signature();
                         sig.returns.push(AbiParam::new(types::I64));
-                        let func_id = self.module.declare_function("main", Linkage::Export, &sig)?;
+                        let func_id =
+                            self.module
+                                .declare_function("main", Linkage::Export, &sig)?;
 
                         let mut func_ctx = FunctionBuilderContext::new();
                         let mut ctx = self.module.make_context();
@@ -113,7 +127,9 @@ impl<'a> CodeGenerator<'a> {
                             // Compile all non-function statements as part of main
                             for stmt in &program.statements {
                                 match stmt {
-                                    Stmt::FuncDef { .. } | Stmt::StructDef { .. } | Stmt::FuncExternDecl { .. } => {
+                                    Stmt::FuncDef { .. }
+                                    | Stmt::StructDef { .. }
+                                    | Stmt::FuncExternDecl { .. } => {
                                         continue;
                                     }
                                     _ => {
@@ -145,7 +161,6 @@ impl<'a> CodeGenerator<'a> {
         Ok(())
     }
 
-
     pub fn compile_stmt(
         &mut self,
         stmt: &Stmt,
@@ -153,15 +168,22 @@ impl<'a> CodeGenerator<'a> {
         loop_stack: &mut Vec<LoopContext>,
     ) -> Result<()> {
         match stmt {
-            Stmt::VarDecl { name, var_type, init_expr } => {
-                let var = Variable::new(self.current_scope().variables.len());
+            Stmt::VarDecl {
+                name,
+                var_type,
+                init_expr,
+            } => {
+                // Use the global counter instead of scope-local counter
+                let var = Variable::new(self.next_var_index());
                 let cl_type = self.ast_type_to_cl_type(var_type)?;
 
-                builder.declare_var(var, cl_type);
-                
                 // Add to current scope before initializing
                 self.current_scope().variables.insert(name.clone(), var);
-                self.current_scope().variable_types.insert(name.clone(), var_type.clone());
+                self.current_scope()
+                    .variable_types
+                    .insert(name.clone(), var_type.clone());
+
+                builder.declare_var(var, cl_type);
 
                 if let Some(expr) = init_expr {
                     let value = self.compile_expr(expr, Some(builder), loop_stack)?;
@@ -172,13 +194,17 @@ impl<'a> CodeGenerator<'a> {
                 }
             }
             Stmt::Block(stmts) => {
+                // Push a new scope before processing the block
                 self.push_scope();
+
                 for stmt in stmts {
                     self.compile_stmt(stmt, builder, loop_stack)?;
                     if self.is_current_block_terminated(builder) {
                         break;
                     }
                 }
+
+                // Pop the scope after processing the block
                 self.pop_scope();
             }
             Stmt::VarAssign { name, expr } => {
@@ -210,7 +236,10 @@ impl<'a> CodeGenerator<'a> {
             Stmt::FuncDef { func_decl, body } => {
                 self.compile_func_def(func_decl, body)?;
             }
-            Stmt::FuncExternDecl { name: func_decl, lib: _ } => {
+            Stmt::FuncExternDecl {
+                name: func_decl,
+                lib: _,
+            } => {
                 self.compile_func_extern_decl(func_decl)?;
             }
             Stmt::StructDef { name, fields } => {
@@ -265,7 +294,9 @@ impl<'a> CodeGenerator<'a> {
 
     pub fn compile_func_def(&mut self, func_decl: &FuncDecl, body: &Stmt) -> Result<()> {
         let sig = self.create_signature(&func_decl.params, &func_decl.return_type)?;
-        let func_id = self.module.declare_function(&func_decl.name, Linkage::Local, &sig)?;
+        let func_id = self
+            .module
+            .declare_function(&func_decl.name, Linkage::Local, &sig)?;
 
         let mut func_ctx = FunctionBuilderContext::new();
         let mut ctx = self.module.make_context();
@@ -289,15 +320,17 @@ impl<'a> CodeGenerator<'a> {
             for (i, (name, param_type)) in func_decl.params.iter().enumerate() {
                 let var = Variable::new(var_index);
                 var_index += 1;
-                
+
                 let cl_type = self.ast_type_to_cl_type(param_type)?;
                 builder.declare_var(var, cl_type);
-                
+
                 let val = builder.block_params(entry_block)[i];
                 builder.def_var(var, val);
-                
+
                 self.current_scope().variables.insert(name.clone(), var);
-                self.current_scope().variable_types.insert(name.clone(), param_type.clone());
+                self.current_scope()
+                    .variable_types
+                    .insert(name.clone(), param_type.clone());
             }
 
             // Update compile_stmt to use the var_index counter
@@ -327,13 +360,11 @@ impl<'a> CodeGenerator<'a> {
 
     pub fn compile_func_extern_decl(&mut self, func_decl: &FuncDecl) -> Result<()> {
         let sig = self.create_signature(&func_decl.params, &func_decl.return_type)?;
-        
+
         // Declare the function with Import linkage
-        let func_id = self.module.declare_function(
-            &func_decl.name,
-            Linkage::Import,
-            &sig
-        )?;
+        let func_id = self
+            .module
+            .declare_function(&func_decl.name, Linkage::Import, &sig)?;
 
         // Store the function ID for later use
         self.function_ids.insert(func_decl.name.clone(), func_id);
@@ -349,7 +380,9 @@ impl<'a> CodeGenerator<'a> {
     ) -> Result<Value> {
         if let Some(builder) = builder_opt.as_deref_mut() {
             if self.is_current_block_terminated(builder) {
-                return Err(anyhow::anyhow!("Cannot add instructions to a terminated block"));
+                return Err(anyhow::anyhow!(
+                    "Cannot add instructions to a terminated block"
+                ));
             }
 
             match expr {
@@ -370,6 +403,14 @@ impl<'a> CodeGenerator<'a> {
                     let lhs_val = self.compile_expr(lhs, Some(builder), loop_stack)?;
                     let rhs_val = self.compile_expr(rhs, Some(builder), loop_stack)?;
 
+                    let lhs_type = builder.func.dfg.value_type(lhs_val);
+                    let rhs_type = builder.func.dfg.value_type(rhs_val);
+
+                    // check if types are the same
+                    if lhs_type != rhs_type {
+                        return Err(anyhow::anyhow!("Type mismatch in binary operation"));
+                    }
+
                     let result = match op {
                         // Integer arithmetic
                         BinOp::Add => builder.ins().iadd(lhs_val, rhs_val),
@@ -387,64 +428,60 @@ impl<'a> CodeGenerator<'a> {
                         // Integer comparisons
                         BinOp::Equal => {
                             let cmp = builder.ins().icmp(IntCC::Equal, lhs_val, rhs_val);
-                            builder.ins().bmask(types::I64, cmp)
+                            builder.ins().bmask(lhs_type, cmp)
                         }
                         BinOp::NotEqual => {
                             let cmp = builder.ins().icmp(IntCC::NotEqual, lhs_val, rhs_val);
-                            builder.ins().bmask(types::I64, cmp)
+                            builder.ins().bmask(lhs_type, cmp)
                         }
                         BinOp::LessThan => {
                             let cmp = builder.ins().icmp(IntCC::SignedLessThan, lhs_val, rhs_val);
-                            builder.ins().bmask(types::I64, cmp)
+                            builder.ins().bmask(lhs_type, cmp)
                         }
                         BinOp::LessThanEqual => {
-                            let cmp = builder.ins().icmp(IntCC::SignedLessThanOrEqual, lhs_val, rhs_val);
-                            builder.ins().bmask(types::I64, cmp)
+                            let cmp =
+                                builder
+                                    .ins()
+                                    .icmp(IntCC::SignedLessThanOrEqual, lhs_val, rhs_val);
+                            builder.ins().bmask(lhs_type, cmp)
                         }
                         BinOp::GreaterThan => {
-                            let cmp = builder.ins().icmp(IntCC::SignedGreaterThan, lhs_val, rhs_val);
-                            builder.ins().bmask(types::I64, cmp)
+                            let cmp =
+                                builder
+                                    .ins()
+                                    .icmp(IntCC::SignedGreaterThan, lhs_val, rhs_val);
+                            builder.ins().bmask(lhs_type, cmp)
                         }
                         BinOp::GreaterThanEqual => {
-                            let cmp = builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, lhs_val, rhs_val);
-                            builder.ins().bmask(types::I64, cmp)
+                            let cmp = builder.ins().icmp(
+                                IntCC::SignedGreaterThanOrEqual,
+                                lhs_val,
+                                rhs_val,
+                            );
+                            builder.ins().bmask(lhs_type, cmp)
                         }
 
                         // Float comparisons
-                        BinOp::FEqual => {
-                            let cmp = builder.ins().fcmp(FloatCC::Equal, lhs_val, rhs_val);
-                            builder.ins().bmask(types::I64, cmp)
-                        }
-                        BinOp::FNotEqual => {
-                            let cmp = builder.ins().fcmp(FloatCC::NotEqual, lhs_val, rhs_val);
-                            builder.ins().bmask(types::I64, cmp)
-                        }
-                        BinOp::FLessThan => {
-                            let cmp = builder.ins().fcmp(FloatCC::LessThan, lhs_val, rhs_val);
-                            builder.ins().bmask(types::I64, cmp)
-                        }
+                        BinOp::FEqual => builder.ins().fcmp(FloatCC::Equal, lhs_val, rhs_val),
+                        BinOp::FNotEqual => builder.ins().fcmp(FloatCC::NotEqual, lhs_val, rhs_val),
+                        BinOp::FLessThan => builder.ins().fcmp(FloatCC::LessThan, lhs_val, rhs_val),
                         BinOp::FLessThanEqual => {
-                            let cmp = builder.ins().fcmp(FloatCC::LessThanOrEqual, lhs_val, rhs_val);
-                            builder.ins().bmask(types::I64, cmp)
+                            builder
+                                .ins()
+                                .fcmp(FloatCC::LessThanOrEqual, lhs_val, rhs_val)
                         }
                         BinOp::FGreaterThan => {
-                            let cmp = builder.ins().fcmp(FloatCC::GreaterThan, lhs_val, rhs_val);
-                            builder.ins().bmask(types::I64, cmp)
+                            builder.ins().fcmp(FloatCC::GreaterThan, lhs_val, rhs_val)
                         }
                         BinOp::FGreaterThanEqual => {
-                            let cmp = builder.ins().fcmp(FloatCC::GreaterThanOrEqual, lhs_val, rhs_val);
-                            builder.ins().bmask(types::I64, cmp)
+                            builder
+                                .ins()
+                                .fcmp(FloatCC::GreaterThanOrEqual, lhs_val, rhs_val)
                         }
 
                         // Logical operators
-                        BinOp::And => {
-                            let cmp = builder.ins().band(lhs_val, rhs_val);
-                            builder.ins().bmask(types::I64, cmp)
-                        }
-                        BinOp::Or => {
-                            let cmp = builder.ins().bor(lhs_val, rhs_val);
-                            builder.ins().bmask(types::I64, cmp)
-                        }
+                        BinOp::And => builder.ins().band(lhs_val, rhs_val),
+                        BinOp::Or => builder.ins().bor(lhs_val, rhs_val),
 
                         // Bitwise operators
                         BinOp::BitAnd => builder.ins().band(lhs_val, rhs_val),
@@ -538,7 +575,7 @@ impl<'a> CodeGenerator<'a> {
         // Do not seal loop_header yet
 
         let cond_val = self.compile_expr(condition, Some(builder), loop_stack)?;
-        let zero = builder.ins().iconst(types::I64, 0);  // Use I64 instead of I8
+        let zero = builder.ins().iconst(types::I64, 0); // Use I64 instead of I8
         let cmp = builder.ins().icmp(IntCC::NotEqual, cond_val, zero);
 
         builder.ins().brif(cmp, loop_body, &[], loop_exit, &[]);
@@ -594,7 +631,7 @@ impl<'a> CodeGenerator<'a> {
     fn ast_type_to_cl_type(&self, ast_type: &AstType) -> Result<Type> {
         match ast_type {
             AstType::Int => Ok(types::I64),
-            AstType::Float => Ok(types::F64),  // Add float type support
+            AstType::Float => Ok(types::F64), // Add float type support
             AstType::Bool => Ok(types::I8),
             AstType::Void => Ok(types::INVALID),
             AstType::Struct(name) => {
@@ -617,9 +654,9 @@ impl<'a> CodeGenerator<'a> {
         if let Some(block) = builder.current_block() {
             if let Some(inst) = builder.func.layout.last_inst(block) {
                 let inst_data = &builder.func.dfg.insts[inst];
-                inst_data.opcode().is_terminator()  // Return this boolean value directly
+                inst_data.opcode().is_terminator() // Return this boolean value directly
             } else {
-                false 
+                false
             }
         } else {
             true
@@ -649,10 +686,13 @@ impl<'a> CodeGenerator<'a> {
         let total_size = (offset + max_alignment - 1) & !(max_alignment - 1);
 
         // Store the layout
-        self.struct_layouts.insert(name.to_string(), StructLayout {
-            field_offsets,
-            total_size,
-        });
+        self.struct_layouts.insert(
+            name.to_string(),
+            StructLayout {
+                field_offsets,
+                total_size,
+            },
+        );
 
         // Store the struct definition
         self.struct_types.insert(name.to_string(), fields.to_vec());
@@ -672,7 +712,11 @@ impl<'a> CodeGenerator<'a> {
             if let Some(&offset) = layout.field_offsets.get(field_name) {
                 Ok(offset)
             } else {
-                Err(anyhow::anyhow!("Field {} not found in struct {}", field_name, struct_name))
+                Err(anyhow::anyhow!(
+                    "Field {} not found in struct {}",
+                    field_name,
+                    struct_name
+                ))
             }
         } else {
             Err(anyhow::anyhow!("Struct {} not found", struct_name))
@@ -693,10 +737,16 @@ impl<'a> CodeGenerator<'a> {
             Expr::Variable(var_name) => {
                 if let AstType::Struct(struct_name) = &self.get_variable_type(var_name)? {
                     if let Some(fields) = self.struct_types.get(struct_name) {
-                        if let Some((_, field_type)) = fields.iter().find(|(name, _)| name == field_name) {
+                        if let Some((_, field_type)) =
+                            fields.iter().find(|(name, _)| name == field_name)
+                        {
                             Ok(field_type.clone())
                         } else {
-                            Err(anyhow::anyhow!("Field {} not found in struct {}", field_name, struct_name))
+                            Err(anyhow::anyhow!(
+                                "Field {} not found in struct {}",
+                                field_name,
+                                struct_name
+                            ))
                         }
                     } else {
                         Err(anyhow::anyhow!("Struct {} not found", struct_name))
@@ -710,10 +760,16 @@ impl<'a> CodeGenerator<'a> {
                 let inner_type = self.get_field_type(inner_struct, inner_field)?;
                 if let AstType::Struct(struct_name) = inner_type {
                     if let Some(fields) = self.struct_types.get(&struct_name) {
-                        if let Some((_, field_type)) = fields.iter().find(|(name, _)| name == field_name) {
+                        if let Some((_, field_type)) =
+                            fields.iter().find(|(name, _)| name == field_name)
+                        {
                             Ok(field_type.clone())
                         } else {
-                            Err(anyhow::anyhow!("Field {} not found in struct {}", field_name, struct_name))
+                            Err(anyhow::anyhow!(
+                                "Field {} not found in struct {}",
+                                field_name,
+                                struct_name
+                            ))
                         }
                     } else {
                         Err(anyhow::anyhow!("Struct {} not found", struct_name))
@@ -736,7 +792,9 @@ impl<'a> CodeGenerator<'a> {
             Expr::StructAccess(struct_expr, field_name) => {
                 self.get_field_type(struct_expr, field_name)
             }
-            _ => Err(anyhow::anyhow!("Type inference not implemented for this expression")),
+            _ => Err(anyhow::anyhow!(
+                "Type inference not implemented for this expression"
+            )),
         }
     }
 
@@ -767,10 +825,10 @@ impl<'a> CodeGenerator<'a> {
     // Add this helper function to get type alignment
     fn get_type_alignment(&self, ast_type: &AstType) -> Result<usize> {
         match ast_type {
-            AstType::Int => Ok(8),  // 64-bit alignment
-            AstType::Bool => Ok(1), // 8-bit alignment
-            AstType::Char => Ok(1), // 8-bit alignment
-            AstType::String => Ok(8), // Pointer alignment
+            AstType::Int => Ok(8),        // 64-bit alignment
+            AstType::Bool => Ok(1),       // 8-bit alignment
+            AstType::Char => Ok(1),       // 8-bit alignment
+            AstType::String => Ok(8),     // Pointer alignment
             AstType::Pointer(_) => Ok(8), // Pointer alignment
             AstType::Struct(name) => {
                 // For structs, use the maximum alignment of their fields
@@ -786,7 +844,10 @@ impl<'a> CodeGenerator<'a> {
             }
             AstType::Array(elem_type) => self.get_type_alignment(elem_type),
             AstType::Void => Ok(1),
-            _ => Err(anyhow::anyhow!("Unsupported type for alignment calculation: {:?}", ast_type))
+            _ => Err(anyhow::anyhow!(
+                "Unsupported type for alignment calculation: {:?}",
+                ast_type
+            )),
         }
     }
 
@@ -803,22 +864,25 @@ impl<'a> CodeGenerator<'a> {
             }
             AstType::Struct(name) => self.get_struct_size(name),
             AstType::Void => Ok(0),
-            _ => Err(anyhow::anyhow!("Unsupported type for size calculation: {:?}", ast_type))
+            _ => Err(anyhow::anyhow!(
+                "Unsupported type for size calculation: {:?}",
+                ast_type
+            )),
         }
     }
 
     fn compile_string_literal(&mut self, s: &str, builder: &mut FunctionBuilder) -> Result<Value> {
         let mut data = DataDescription::new();
-        
+
         // Add null terminator for C strings
         let mut string_data = s.as_bytes().to_vec();
         string_data.push(0);
-        
+
         data.define(string_data.into_boxed_slice());
-        
+
         // Create a unique name for the string
         let name = format!("str_{}", self.next_string_id());
-        
+
         // Declare the data in the module
         let data_id = self.module.declare_data(
             &name,
@@ -826,13 +890,13 @@ impl<'a> CodeGenerator<'a> {
             true,  // readonly
             false, // not thread local
         )?;
-        
+
         // Define the data
         self.module.define_data(data_id, &data)?;
-        
+
         // Get a reference to the data in the function
         let local_id = self.module.declare_data_in_func(data_id, builder.func);
-        
+
         // Get the address of the string
         Ok(builder.ins().symbol_value(types::I64, local_id))
     }
@@ -857,16 +921,22 @@ impl<'a> CodeGenerator<'a> {
         var_index: &mut usize,
     ) -> Result<()> {
         match stmt {
-            Stmt::VarDecl { name, var_type, init_expr } => {
+            Stmt::VarDecl {
+                name,
+                var_type,
+                init_expr,
+            } => {
                 let var = Variable::new(*var_index);
                 *var_index += 1;
-                
+
                 let cl_type = self.ast_type_to_cl_type(var_type)?;
                 builder.declare_var(var, cl_type);
-                
+
                 // Add to current scope before initializing
                 self.current_scope().variables.insert(name.clone(), var);
-                self.current_scope().variable_types.insert(name.clone(), var_type.clone());
+                self.current_scope()
+                    .variable_types
+                    .insert(name.clone(), var_type.clone());
 
                 if let Some(expr) = init_expr {
                     let value = self.compile_expr(expr, Some(builder), loop_stack)?;
@@ -1135,9 +1205,13 @@ mod tests {
         let mut module = JITModule::new(builder);
 
         let mut codegen = CodeGenerator::new(&mut module);
-        let result = codegen.compile_program(&program);
-
-        assert!(result.is_ok());
+        
+        match codegen.compile_program(&program) {
+            Ok(_) => (),
+            Err(e) => {
+                panic!("Compilation failed: {:?}", e);
+            }
+        }
     }
 
     #[test]
@@ -1218,9 +1292,13 @@ mod tests {
         let mut module = JITModule::new(builder);
 
         let mut codegen = CodeGenerator::new(&mut module);
-        let result = codegen.compile_program(&program);
 
-        assert!(result.is_ok());
+        match codegen.compile_program(&program) {
+            Ok(_) => (),
+            Err(e) => {
+                panic!("Compilation failed: {:?}", e);
+            }
+        }
     }
 
     #[test]

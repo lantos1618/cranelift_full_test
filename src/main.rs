@@ -1,20 +1,14 @@
 // src/main.rs
 
-mod ast_validator;
-mod ast;
-mod cl_codegen;
-mod lexer;
-mod token;
-mod parser;
-mod error;
 
-use ast_validator::AstValidator;
-use cl_codegen::CodeGenerator;
-use lexer::Lexer;
-use parser::Parser;
 use cranelift_jit::JITBuilder;
 use cranelift_jit::JITModule;
 use cranelift_codegen::settings;
+
+use cranelift_test::lexer::Lexer;
+use cranelift_test::parser::Parser;
+use cranelift_test::ast_validator::AstValidator;
+use cranelift_test::cl_codegen::CodeGenerator;
 
 fn main() {
     // Sample source code demonstrating key language features
